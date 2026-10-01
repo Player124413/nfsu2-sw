@@ -1,0 +1,232 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      generated_source_url:
+        description: >-
+          HTTPS URL of a tar.gz or zip containing the generated recomp C
+          directory. Leave empty when NFSU2_GEN_URL is configured as a secret.
+        required: false
+        type: string
+      generated_source_sha256:
+        description: Optional SHA-256 of generated_source_url (64 hex characters)
+        required: false
+        type: string
+      xbe_url:
+        description: >-
+          Optional HTTPS URL of your own default.xbe. If no generated source
+          archive is supplied, the workflow regenerates the C code from this.
+        required: false
+        type: string
+      xbe_sha256:
+        description: Optional SHA-256 of xbe_url (64 hex characters)
+        required: false
+        type: string
+      build_type:
+        description: Gradle build type
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - debug
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build installable Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      # These secrets are optional. They are useful when the generated code or
+      # the user's XBE is stored in private object storage rather than in git.
+      NFSU2_GEN_URL: ${{ secrets.NFSU2_GEN_URL }}
+      NFSU2_GEN_TOKEN: ${{ secrets.NFSU2_GEN_TOKEN }}
+      NFSU2_GEN_SHA256: ${{ secrets.NFSU2_GEN_SHA256 }}
+      NFSU2_XBE_URL: ${{ secrets.NFSU2_XBE_URL }}
+      NFSU2_XBE_TOKEN: ${{ secrets.NFSU2_XBE_TOKEN }}
+      NFSU2_XBE_SHA256: ${{ secrets.NFSU2_XBE_SHA256 }}
+
+    steps:
+      - name: Check out port
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and CMake
+        run: |
+          set -euo pipefail
+          sdkmanager --install \
+            'platform-tools' \
+            'platforms;android-35' \
+            'build-tools;35.0.0' \
+            'ndk;27.0.12077973' \
+            'cmake;3.22.1'
+          yes | sdkmanager --licenses >/dev/null || true
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Download SDL2
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch release-2.30.0 \
+            https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/SDL2"
+          test -f "$RUNNER_TEMP/SDL2/CMakeLists.txt"
+          test -f "$RUNNER_TEMP/SDL2/android-project/app/src/main/java/org/libsdl/app/SDLActivity.java"
+
+      - name: Prepare generated game code
+        env:
+          INPUT_GEN_URL: ${{ inputs.generated_source_url }}
+          INPUT_GEN_SHA256: ${{ inputs.generated_source_sha256 }}
+          INPUT_XBE_URL: ${{ inputs.xbe_url }}
+          INPUT_XBE_SHA256: ${{ inputs.xbe_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nfsu2-gen" "$RUNNER_TEMP/xbe"
+
+          GEN_URL="${INPUT_GEN_URL:-${NFSU2_GEN_URL:-}}"
+          GEN_SHA256="${INPUT_GEN_SHA256:-}"
+          if [[ -z "$GEN_SHA256" && -n "$GEN_URL" ]]; then
+            GEN_SHA256="${NFSU2_GEN_SHA256:-}"
+          fi
+
+          download() {
+            local url="$1" output="$2" token="${3:-}"
+            if [[ -n "$token" ]]; then
+              curl --fail --location --retry 5 --retry-all-errors \
+                --header "Authorization: Bearer $token" "$url" -o "$output"
+            else
+              curl --fail --location --retry 5 --retry-all-errors "$url" -o "$output"
+            fi
+          }
+
+          verify_hash() {
+            local file="$1" expected="$2"
+            [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || {
+              echo "Invalid SHA-256: expected 64 hexadecimal characters" >&2
+              exit 1
+            }
+            echo "$expected  $file" | sha256sum --check --status
+          }
+
+          if [[ -n "$GEN_URL" ]]; then
+            archive="$RUNNER_TEMP/generated.archive"
+            download "$GEN_URL" "$archive" "${NFSU2_GEN_TOKEN:-}"
+            [[ -z "$GEN_SHA256" ]] || verify_hash "$archive" "$GEN_SHA256"
+            if unzip -t "$archive" >/dev/null 2>&1; then
+              unzip -q "$archive" -d "$RUNNER_TEMP/nfsu2-gen"
+            else
+              tar -xf "$archive" -C "$RUNNER_TEMP/nfsu2-gen"
+            fi
+          else
+            XBE_URL="${INPUT_XBE_URL:-${NFSU2_XBE_URL:-}}"
+            XBE_SHA256="${INPUT_XBE_SHA256:-${NFSU2_XBE_SHA256:-}}"
+            [[ -n "$XBE_URL" ]] || {
+              cat >&2 <<'EOF'
+No generated game code was supplied.
+
+Run this workflow with generated_source_url, or configure the private
+repository secret NFSU2_GEN_URL (and optionally NFSU2_GEN_TOKEN). As an
+alternative, provide xbe_url for your own legally owned default.xbe so the
+workflow can run tools/regen.sh. Game data and generated code are intentionally
+not committed to this repository.
+EOF
+              exit 1
+            }
+            xbe="$RUNNER_TEMP/xbe/default.xbe"
+            download "$XBE_URL" "$xbe" "${NFSU2_XBE_TOKEN:-}"
+            [[ -z "$XBE_SHA256" ]] || verify_hash "$xbe" "$XBE_SHA256"
+            python3 -m pip install --disable-pip-version-check --no-input capstone
+            NFSU2_XBE="$xbe" \
+              NFSU2_GEN_DIR="$RUNNER_TEMP/nfsu2-gen" \
+              XBOXRECOMP_DIR="$GITHUB_WORKSPACE/xboxrecomp" \
+              bash tools/regen.sh
+          fi
+
+          mapfile -t headers < <(find "$RUNNER_TEMP/nfsu2-gen" -type f -name recomp_funcs.h -print)
+          [[ "${#headers[@]}" -eq 1 ]] || {
+            echo "The generated archive must contain exactly one recomp_funcs.h" >&2
+            find "$RUNNER_TEMP/nfsu2-gen" -maxdepth 3 -type f | sort | head -100 >&2 || true
+            exit 1
+          }
+          GEN_DIR="$(dirname "${headers[0]}")"
+          generated_c="$(find "$GEN_DIR" -maxdepth 1 -type f -name '*.c' | wc -l)"
+          [[ "$generated_c" -gt 0 ]] || {
+            echo "No generated C files were found next to recomp_funcs.h" >&2
+            exit 1
+          }
+          echo "NFSU2_GEN_DIR=$GEN_DIR" >> "$GITHUB_ENV"
+          echo "Using $generated_c generated C files from $GEN_DIR"
+
+      - name: Build APK
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+          gradle --no-daemon --stacktrace --warning-mode all \
+            -p android \
+            ":app:assemble${{ inputs.build_type == 'debug' && 'Debug' || 'Release' }}" \
+            -Psdl2.dir="$RUNNER_TEMP/SDL2" \
+            -Pnfsu2.gen.dir="$NFSU2_GEN_DIR"
+
+      - name: Sign and verify APK
+        id: apk
+        run: |
+          set -euo pipefail
+          apk_unsigned="$(find android/app/build/outputs/apk -type f -name '*unsigned.apk' | head -1)"
+          if [[ -z "$apk_unsigned" ]]; then
+            apk_unsigned="$(find android/app/build/outputs/apk -type f -name '*.apk' | head -1)"
+          fi
+          [[ -n "$apk_unsigned" && -f "$apk_unsigned" ]] || {
+            echo "Gradle did not produce an APK" >&2
+            find android/app/build/outputs -type f -print >&2 || true
+            exit 1
+          }
+
+          final="$GITHUB_WORKSPACE/nfsu2x-android-${GITHUB_SHA::12}.apk"
+          if [[ "$apk_unsigned" == *unsigned.apk ]]; then
+            keytool -genkeypair -v \
+              -keystore "$RUNNER_TEMP/android-debug.keystore" \
+              -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname 'CN=Android Debug,O=NFSU2,C=US' >/dev/null 2>&1
+            aligned="$RUNNER_TEMP/nfsu2x-aligned.apk"
+            zipalign -f -p 4 "$apk_unsigned" "$aligned"
+            apksigner sign --ks "$RUNNER_TEMP/android-debug.keystore" \
+              --ks-pass pass:android --key-pass pass:android \
+              --ks-key-alias androiddebugkey --out "$final" "$aligned"
+          else
+            # Debug variants are already signed by AGP's debug keystore.
+            cp "$apk_unsigned" "$final"
+          fi
+          apksigner verify --verbose "$final"
+          sha256sum "$final" | tee "$final.sha256"
+          echo "path=$final" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfsu2x-android-${{ inputs.build_type }}
+          if-no-files-found: error
+          path: |
+            ${{ steps.apk.outputs.path }}
+            ${{ steps.apk.outputs.path }}.sha256
+          retention-days: 14

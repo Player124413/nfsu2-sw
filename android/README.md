@@ -25,8 +25,16 @@ gradle -p android :app:assembleRelease \
   -Pnfsu2.gen.dir=/path/to/generated/gen
 ```
 
-Install `android/app/build/outputs/apk/release/app-release.apk`. The launcher
-opens the Storage Access Framework directory picker. Select the root of the
+To build from GitHub Actions, open **Actions → Android APK → Run workflow**.
+Provide a URL to an archive containing the generated C directory, or configure
+`NFSU2_GEN_URL` as a repository secret. The archive must contain exactly one
+`recomp_funcs.h` next to the generated `.c` files. The workflow also accepts an
+optional URL to your own `default.xbe` and can run `tools/regen.sh`; game data
+and generated code are never committed. It uploads a signed, installable APK
+and a SHA-256 file as an Actions artifact.
+
+For local builds, install `android/app/build/outputs/apk/release/app-release.apk`.
+The launcher opens the Storage Access Framework directory picker. Select the root of the
 extracted disc, containing `default.xbe` and `NFSUNDER/`; it copies the files
 into the app's private directory and validates the XBE before enabling **Play**.
 The copy needs approximately the size of the extracted disc again as free

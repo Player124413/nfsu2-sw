@@ -18,6 +18,7 @@ if (genDir.isEmpty()) {
 android {
     namespace 'com.nfsu2x'
     compileSdk 35
+    ndkVersion '27.0.12077973'
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
