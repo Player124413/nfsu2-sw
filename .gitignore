@@ -37,6 +37,13 @@ game/
 *.iso
 *.xiso
 
+# Android/Gradle
+android/.gradle/
+android/.cxx/
+android/build/
+android/app/build/
+android/local.properties
+
 # IDE
 .vscode/
 .idea/

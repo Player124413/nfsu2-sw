@@ -1,0 +1,88 @@
+plugins {
+    id 'com.android.application'
+}
+
+def repoRoot = projectDir.parentFile.parentFile
+// SDL2's Android Java bridge is part of the upstream SDL checkout. Keeping
+// it external avoids forking a large third-party tree into this repository.
+def sdl2Dir = (findProperty('sdl2.dir') ?: System.getenv('ANDROID_SDL2_DIR') ?: '').toString()
+def genDir = (findProperty('nfsu2.gen.dir') ?: System.getenv('NFSU2_GEN_DIR') ?: '').toString()
+
+if (sdl2Dir.isEmpty()) {
+    throw new GradleException('Pass -Psdl2.dir=/path/to/SDL2 (the official SDL2 checkout)')
+}
+if (genDir.isEmpty()) {
+    throw new GradleException('Pass -Pnfsu2.gen.dir=/path/to/generated/recomp code')
+}
+
+android {
+    namespace 'com.nfsu2x'
+    compileSdk 35
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    defaultConfig {
+        applicationId 'com.nfsu2x'
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+
+        ndk {
+            // The lifted Xbox code is 32-bit guest code, but the host port is
+            // intentionally 64-bit only. ARM64 is the primary Android ABI;
+            // x86_64 is useful for emulator/Steam Deck-style testing.
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_SDL2_DIR=${sdl2Dir}",
+                          "-DNFSU2_GEN_DIR=${genDir}",
+                          '-DNFSU2_VULKAN=OFF'
+                cppFlags ''
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+            jniDebuggable true
+            applicationIdSuffix '.debug'
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../../CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    sourceSets {
+        main {
+            // org.libsdl.app.SDLActivity and its resources come from SDL2.
+            java.srcDirs += file("${sdl2Dir}/android-project/app/src/main/java")
+            res.srcDirs += file("${sdl2Dir}/android-project/app/src/main/res")
+            assets.srcDirs += file("${repoRoot}/android/app/src/main/assets")
+        }
+    }
+
+    packagingOptions {
+        jniLibs.useLegacyPackaging true
+        resources.excludes += ['META-INF/LICENSE*', 'META-INF/NOTICE*']
+    }
+
+    lint {
+        abortOnError false
+    }
+}

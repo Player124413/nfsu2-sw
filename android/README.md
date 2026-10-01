@@ -1,0 +1,61 @@
+# Android 64-bit port
+
+This directory is the Android Studio launcher and the native Android target for
+this recompilation. It supports `arm64-v8a` and `x86_64`, uses the upstream SDL2
+Android backend, and keeps the extracted game data in app-private storage.
+The launcher does **not** include game data: use your own legally obtained copy.
+
+## Dependencies
+
+- Android Studio with SDK 35, NDK 27.x and CMake 3.22.1
+- an SDL2 checkout matching the release used by the app; it must contain
+  `CMakeLists.txt` and `android-project/app/src/main/java/org/libsdl/app/SDLActivity.java`
+- generated recompilation output containing `recomp_funcs.h` and the generated
+  `.c` files (`tools/regen.sh`)
+
+SDL2 is intentionally an external dependency rather than a vendored copy.
+
+## Build
+
+From the repository root:
+
+```sh
+gradle -p android :app:assembleRelease \
+  -Psdl2.dir=/path/to/SDL2 \
+  -Pnfsu2.gen.dir=/path/to/generated/gen
+```
+
+Install `android/app/build/outputs/apk/release/app-release.apk`. The launcher
+opens the Storage Access Framework directory picker. Select the root of the
+extracted disc, containing `default.xbe` and `NFSUNDER/`; it copies the files
+into the app's private directory and validates the XBE before enabling **Play**.
+The copy needs approximately the size of the extracted disc again as free
+space. App data can be removed from Android Settings to delete that copy.
+
+## Runtime design
+
+- `LauncherActivity` — game-folder import, render-scale and 60 Hz pacing options.
+- `GameActivity` — SDL surface plus `TouchOverlay`.
+- `TouchOverlay` — multi-touch Xbox layout with an analogue steering stick,
+  d-pad, face buttons, shoulder buttons, triggers and Start/Back.
+- `src/android/android_bridge.c` — SDL entry point, JNI settings and virtual
+  XInput state bridge.
+- `xboxrecomp/src/input/android_input.c` — mutex-protected touch state merged
+  with SDL physical controllers.
+- GLES 3 renderer path — GLSL ES 3.00, GLES depth-name compatibility,
+  BGRA/S3TC capability checks and RGBA fallback for devices without those
+  extensions.
+
+The native path defaults to `RECOMP_GL_SCALE=1.0`, SDL swap interval 1 and the
+existing optimized renderer settings. `0.75x` is available for thermally
+constrained phones; `1.25x` is a quality option for stronger devices.
+
+## Performance expectations
+
+A 60 FPS target and frame pacing are implemented, but no software can honestly
+guarantee 60 FPS on *every* 64-bit phone: GPU drivers, thermal throttling,
+background load, display refresh rate and the selected race/resolution all
+matter. First validation should be done on the target phone with the same game
+scene; if sustained load heats the device, use `0.75x` and close background
+apps. The launcher never claims that a phone is compatible solely because it is
+64-bit.

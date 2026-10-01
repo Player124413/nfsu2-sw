@@ -97,6 +97,31 @@ static uint64_t hz_now(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+
+#if defined(NFSU2_ANDROID)
+static void android_frame_pace(void)
+{
+    static uint64_t next_ns;
+    const char *vsync = getenv("NFSU2_ANDROID_VSYNC");
+    const uint64_t period = 16666667ull; /* 60 Hz */
+    uint64_t now, wait;
+    struct timespec ts;
+    if (vsync && *vsync == '0')
+        return;
+    now = hz_now();
+    if (!next_ns || now > next_ns + period * 3) {
+        next_ns = now;
+        return;
+    }
+    next_ns += period;
+    if (next_ns <= now)
+        return;
+    wait = next_ns - now;
+    ts.tv_sec = (time_t)(wait / 1000000000ull);
+    ts.tv_nsec = (long)(wait % 1000000000ull);
+    nanosleep(&ts, NULL);
+}
+#endif
 static GLuint        s_cur_prog;         /* what glUseProgram last got */
 static void state_dirty(void);
 /* Last sampler state set on a GL texture (bind_stage). */
@@ -172,6 +197,50 @@ static int     s_shared_z = -1;         /* RECOMP_GL_SHARED_Z=0: old behaviour *
  * driver's size limit. */
 static double s_scale = 1.0;
 static GLint  s_max_size = 4096;
+
+#if defined(NFSU2_ANDROID)
+/* GL_BGRA and S3TC are extensions on GLES, not core GLES 3.0. Prefer the
+ * zero-copy path when the phone exposes them, but transparently convert to
+ * RGBA on devices that do not. This avoids a black texture or a driver error
+ * on otherwise perfectly usable 64-bit phones. */
+static int s_android_bgra = -1;
+static uint8_t *s_android_rgba;
+static size_t s_android_rgba_cap;
+
+static int android_has_bgra(void)
+{
+    const char *ext;
+    if (s_android_bgra >= 0)
+        return s_android_bgra;
+    ext = (const char *)glGetString(0x1F03); /* GL_EXTENSIONS */
+    s_android_bgra = ext && strstr(ext, "GL_EXT_texture_format_BGRA8888") != NULL;
+    return s_android_bgra;
+}
+
+static const void *android_rgba_pixels(const void *src, size_t bytes)
+{
+    size_t i;
+    uint8_t *dst;
+    if (android_has_bgra())
+        return src;
+    if (bytes > s_android_rgba_cap) {
+        size_t cap = bytes < (1u << 20) ? (1u << 20) : bytes;
+        uint8_t *p = (uint8_t *)realloc(s_android_rgba, cap);
+        if (!p)
+            return src; /* the GL error is preferable to an OOM crash */
+        s_android_rgba = p;
+        s_android_rgba_cap = cap;
+    }
+    dst = s_android_rgba;
+    for (i = 0; i + 3 < bytes; i += 4) {
+        dst[i + 0] = ((const uint8_t *)src)[i + 2];
+        dst[i + 1] = ((const uint8_t *)src)[i + 1];
+        dst[i + 2] = ((const uint8_t *)src)[i + 0];
+        dst[i + 3] = ((const uint8_t *)src)[i + 3];
+    }
+    return dst;
+}
+#endif
 
 /* v title pixels of a surface l wide, in the p stored pixels behind it. */
 static GLint to_stored(uint32_t v, uint32_t p, uint32_t l)
@@ -561,11 +630,36 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
          * reallocation. */
         t->hash = hash; t->used = t->checked = s_frame;
         bind_tex(t->tex);
+#if defined(NFSU2_ANDROID)
+        if (!android_has_bgra()) {
+            size_t row_bytes = (size_t)w * 4;
+            size_t total = row_bytes * h;
+            uint8_t *packed = (uint8_t *)malloc(total);
+            const uint8_t *src = (const uint8_t *)xbox_GetMemoryOffset() + va;
+            uint32_t y;
+            if (packed) {
+                for (y = 0; y < h; y++)
+                    memcpy(packed + y * row_bytes, src + y * pitch, row_bytes);
+            }
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)w, (GLsizei)h,
+                            GL_RGBA, GL_UNSIGNED_BYTE,
+                            packed ? android_rgba_pixels(packed, total) : src);
+            free(packed);
+        } else {
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(pitch / 4));
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA,
+                            GL_UNSIGNED_BYTE, (const uint8_t *)xbox_GetMemoryOffset() + va);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        }
+#else
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(pitch / 4));
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA,
                         GL_UNSIGNED_BYTE, (const uint8_t *)xbox_GetMemoryOffset() + va);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+#endif
         gl_step_done("texture upload");
         return t->tex;
     }
@@ -578,11 +672,35 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
 
     if (color == 0x12 && pitch && !(pitch & 3) && pitch / 4 >= w) {
         bind_tex(t->tex);
+#if defined(NFSU2_ANDROID)
+        if (!android_has_bgra()) {
+            size_t row_bytes = (size_t)w * 4;
+            size_t total = row_bytes * h;
+            uint8_t *packed = (uint8_t *)malloc(total);
+            const uint8_t *src = (const uint8_t *)xbox_GetMemoryOffset() + va;
+            uint32_t y;
+            if (packed) {
+                for (y = 0; y < h; y++)
+                    memcpy(packed + y * row_bytes, src + y * pitch, row_bytes);
+            }
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE,
+                         packed ? android_rgba_pixels(packed, total) : src);
+            free(packed);
+        } else {
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(pitch / 4));
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, GL_BGRA,
+                         GL_UNSIGNED_BYTE, (const uint8_t *)xbox_GetMemoryOffset() + va);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        }
+#else
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(pitch / 4));
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, GL_BGRA,
                      GL_UNSIGNED_BYTE, (const uint8_t *)xbox_GetMemoryOffset() + va);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+#endif
         tex_account(t, w * h * 4);
         return t->tex;
     }
@@ -596,6 +714,13 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
         if (s3tc < 0) {
             const char *e = getenv("RECOMP_GL_DXT");
             s3tc = !(e && *e == '0');
+#if defined(NFSU2_ANDROID)
+            {
+                const char *ext = (const char *)glGetString(0x1F03);
+                if (!ext || !strstr(ext, "GL_EXT_texture_compression_s3tc"))
+                    s3tc = 0;
+            }
+#endif
         }
         if (s3tc) {
             GLenum fmt = color == 0x0C ? GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
@@ -633,20 +758,36 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
         for (y = 0; y < h; y++)
             for (x = 0; x < w; x++)
                 s_decode[(size_t)y * w + x] = src[swizzle_index(x, y, w, h)] | fill;
+#if defined(NFSU2_ANDROID)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, android_rgba_pixels(s_decode, (size_t)w * h * 4));
+#else
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+#endif
         tex_account(t, w * h * 4);
         gl_step_done("texture upload");
     } else if (s_decode && (color == 0x0B ? decode_indexed(va, w, h, s_decode)
                                     : nv2a_backend_decode_texture(&nt, s_decode))) {
+#if defined(NFSU2_ANDROID)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, android_rgba_pixels(s_decode, (size_t)w * h * 4));
+#else
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+#endif
         tex_account(t, w * h * 4);
         gl_step_done("texture upload");
     } else {
         static const uint32_t magenta = 0xFFFF00FFu;
+#if defined(NFSU2_ANDROID)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0,
+                     android_has_bgra() ? GL_BGRA : GL_RGBA,
+                     GL_UNSIGNED_BYTE, &magenta);
+#else
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA,
                      GL_UNSIGNED_BYTE, &magenta);
+#endif
         tex_account(t, 4);
         if (s_trace)
             fprintf(stderr, "  [GL] texture 0x%08X format 0x%02X not decodable\n",
@@ -660,7 +801,14 @@ static GLint wrap_mode(uint32_t m)
     switch (m) {
     case 2:  return GL_MIRRORED_REPEAT;
     case 3:  return GL_CLAMP_TO_EDGE;
-    case 4:  return GL_CLAMP_TO_BORDER;
+    case 4:
+#if defined(NFSU2_ANDROID)
+        /* GLES 3.0 has no core border colour; edge clamp is the closest
+         * defined behaviour and avoids sampling undefined texels. */
+        return GL_CLAMP_TO_EDGE;
+#else
+        return GL_CLAMP_TO_BORDER;
+#endif
     case 5:  return GL_CLAMP_TO_EDGE;
     default: return GL_REPEAT;
     }
@@ -1062,9 +1210,17 @@ static int ready(void)
             fprintf(stderr, "  [GL] SDL video: %s\n", SDL_GetError());
             return 0;
         }
+#if defined(NFSU2_ANDROID)
+        /* Android exposes GLES through SDL, not desktop GL 3.3. The shader
+         * generators select GLSL ES 3.00 when this define is set. */
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#else
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+#endif
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
         s_win = SDL_CreateWindow("NV2A", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                  1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
@@ -1078,7 +1234,17 @@ static int ready(void)
             return 0;
         }
     }
+#if defined(NFSU2_ANDROID)
+    /* SurfaceFlinger pacing is the least jittery path on phones. The game
+     * still renders at its fixed 60 Hz time base; this only blocks the
+     * present until the next display interval instead of busy-spinning. */
+    {
+        const char *vsync = getenv("NFSU2_ANDROID_VSYNC");
+        SDL_GL_SetSwapInterval(vsync && *vsync == '0' ? 0 : 1);
+    }
+#else
     SDL_GL_SetSwapInterval(0);
+#endif
     if (nv2a_gl_load(SDL_GL_GetProcAddress) != 0)
         return 0;
     fprintf(stderr, "  [GL] %s / %s / %s\n", (const char *)glGetString(GL_VENDOR),
@@ -2075,6 +2241,9 @@ static void gl_flip(void)
     }
 swap:
     gl_step_done("present");
+#if defined(NFSU2_ANDROID)
+    android_frame_pace();
+#endif
     SDL_GL_SwapWindow(s_win);
     gl_step_done("swap");
     tex_bind_forget();

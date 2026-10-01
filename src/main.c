@@ -73,6 +73,13 @@ extern void xbox_path_init(const char *game_dir, const char *save_dir);
 #  define NFSU2_DEFAULT_SAVE_DIR NULL
 #endif
 
+#if defined(NFSU2_ANDROID)
+/* Set by GameActivity before SDL starts the native title thread. The path is
+ * app-private and contains a copied, user-owned game dump; Android's content
+ * URIs are deliberately not passed into the Xbox file layer. */
+extern const char *nfsu2_android_game_dir(void);
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Crash reporting                                                     */
 /* ------------------------------------------------------------------ */
@@ -151,6 +158,10 @@ static void install_crash_reporter(void)
 }
 #elif defined(__SWITCH__)
 /* The CPU exception handler is in switch_nx.c; it calls print_guest_state. */
+static void install_crash_reporter(void) {}
+#elif defined(NFSU2_ANDROID)
+/* Android's tombstone/logcat handler owns native crash reporting. Keeping
+ * signal handlers out of the app avoids depending on execinfo on API 23. */
 static void install_crash_reporter(void) {}
 #else
 #include <execinfo.h>
@@ -232,7 +243,7 @@ static void fatal(const char *msg)
 #endif
 }
 
-static int game_main(void);
+int nfsu2_game_main(void);
 void xbox_guest_pin(int interrupt);   /* win32_compat.c: the Xbox's one CPU */
 void xbox_gil_enter(void);             /* kernel_bridge.c: the guest lock */
 void xbox_gil_leave(void);
@@ -251,7 +262,7 @@ static void *game_thread(void *arg)
 {
     xbox_nx_spread_thread();
     xbox_nx_track_thread(NULL);          /* "game:" in the [perf] report */
-    *(int *)arg = game_main();
+    *(int *)arg = nfsu2_game_main();
     return NULL;
 }
 
@@ -273,16 +284,16 @@ int main(int argc, char **argv)
     switch_shutdown();
     return rc;
 }
-#else
+#elif !defined(NFSU2_ANDROID)
 int main(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    return game_main();
+    return nfsu2_game_main();
 }
 #endif
 
-static int game_main(void)
+int nfsu2_game_main(void)
 {
     xbox_guest_pin(0);     /* the boot thread becomes the title's first thread */
     char xbe_path[512];
@@ -312,6 +323,14 @@ static int game_main(void)
     setenv("RECOMP_USB", "1", 0);       /* the pad is on the MCPX's OHCI */
     setenv("RECOMP_PB_EXEC", "1", 0);   /* the title draws through NV2A */
 #endif
+#if defined(NFSU2_ANDROID)
+    /* Phones benefit from the same overlap used by the measured Switch path:
+     * rendering is submitted off the guest thread, the previous frame fence
+     * is waited on, and compressed textures stay compressed when supported. */
+    setenv("RECOMP_GL_THREAD", "1", 0);
+    setenv("RECOMP_FRAME_LAG", "1", 0);
+    setenv("RECOMP_GL_DXT", "1", 0);
+#endif
 #if defined(__SWITCH__)
     /* Every periodic log line flushes to the SD card; keep the log to what
      * matters on a console. RECOMP_QUIET=0 in nfsu2x_env.txt brings it back. */
@@ -319,6 +338,10 @@ static int game_main(void)
 #endif
 
     game_dir = getenv("NFSU2_GAME_DIR");
+#if defined(NFSU2_ANDROID)
+    if (!game_dir || !game_dir[0])
+        game_dir = nfsu2_android_game_dir();
+#endif
     if (!game_dir || !game_dir[0])
         game_dir = NFSU2_DEFAULT_GAME_DIR;
     snprintf(xbe_path, sizeof(xbe_path), "%s/default.xbe", game_dir);

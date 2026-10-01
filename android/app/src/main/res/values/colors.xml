@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="nfs_black">#08090D</color>
+    <color name="nfs_panel">#171A23</color>
+    <color name="nfs_panel_light">#242A38</color>
+    <color name="nfs_red">#F0444E</color>
+    <color name="nfs_text">#F5F7FA</color>
+    <color name="nfs_muted">#9AA4B4</color>
+</resources>

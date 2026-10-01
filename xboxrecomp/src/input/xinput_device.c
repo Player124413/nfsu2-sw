@@ -252,6 +252,9 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
 /* ======================================================================== */
 
 #include <SDL.h>
+#if defined(__ANDROID__)
+#include "android_input.h"
+#endif
 
 static SDL_GameController *g_pads[XBOX_MAX_CONTROLLERS];
 static BOOL  g_controller_connected[XBOX_MAX_CONTROLLERS];
@@ -314,8 +317,36 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     }
 #endif
 
+#if defined(__ANDROID__)
+    /* Port 0 is always present on Android: the touch overlay starts at zero
+     * and becomes a regular XInput state as soon as the user touches it.
+     * This also makes "Press START" reachable before a Bluetooth pad is
+     * paired. */
+    if (dwPort == 0) {
+        uint16_t dig;
+        uint8_t ana[8];
+        int16_t th[4];
+        uint32_t packet;
+        android_input_get_state(&dig, ana, th, &packet);
+        memset(pState, 0, sizeof *pState);
+        pState->dwPacketNumber = packet;
+        pState->Gamepad.wButtons = dig;
+        memcpy(pState->Gamepad.bAnalogButtons, ana, sizeof ana);
+        pState->Gamepad.sThumbLX = th[0];
+        pState->Gamepad.sThumbLY = th[1];
+        pState->Gamepad.sThumbRX = th[2];
+        pState->Gamepad.sThumbRY = th[3];
+    }
+#endif
+
     SDL_GameController *c = g_pads[dwPort];
     if (!c || !SDL_GameControllerGetAttached(c)) {
+#if defined(__ANDROID__)
+        if (dwPort == 0) {
+            g_controller_connected[dwPort] = TRUE;
+            return ERROR_SUCCESS;
+        }
+#endif
         g_controller_connected[dwPort] = FALSE;
         return ERROR_DEVICE_NOT_CONNECTED;
     }
@@ -323,7 +354,9 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     SDL_GameControllerUpdate();
     g_controller_connected[dwPort] = TRUE;
 
+#if !defined(__ANDROID__)
     memset(pState, 0, sizeof(XBOX_INPUT_STATE));
+#endif
     pState->dwPacketNumber = ++g_packet[dwPort];
 
     WORD btn = 0;
@@ -335,35 +368,45 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK))       btn |= XBOX_GAMEPAD_BACK;
     if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSTICK))  btn |= XBOX_GAMEPAD_LEFT_THUMB;
     if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) btn |= XBOX_GAMEPAD_RIGHT_THUMB;
-    pState->Gamepad.wButtons = btn;
+    pState->Gamepad.wButtons |= btn;
 
-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_A] =
-        SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A) ? 255 : 0;
-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_B] =
-        SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B) ? 255 : 0;
-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_X] =
-        SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_X) ? 255 : 0;
-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_Y] =
-        SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_Y) ? 255 : 0;
-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK] =
-        SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ? 255 : 0;
-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE] =
-        SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ? 255 : 0;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A))
+        pState->Gamepad.bAnalogButtons[XBOX_BUTTON_A] = 255;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B))
+        pState->Gamepad.bAnalogButtons[XBOX_BUTTON_B] = 255;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_X))
+        pState->Gamepad.bAnalogButtons[XBOX_BUTTON_X] = 255;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_Y))
+        pState->Gamepad.bAnalogButtons[XBOX_BUTTON_Y] = 255;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER))
+        pState->Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK] = 255;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))
+        pState->Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE] = 255;
 
-    /* SDL trigger axes are 0..32767 -> Xbox analog button 0..255 */
-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] =
-        (BYTE)(SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERLEFT) >> 7);
-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_RTRIGGER] =
-        (BYTE)(SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) >> 7);
+    /* SDL trigger axes are 0..32767 -> Xbox analog button 0..255. */
+    {
+        BYTE left = (BYTE)(SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERLEFT) >> 7);
+        BYTE right = (BYTE)(SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) >> 7);
+        if (left > pState->Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER])
+            pState->Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] = left;
+        if (right > pState->Gamepad.bAnalogButtons[XBOX_BUTTON_RTRIGGER])
+            pState->Gamepad.bAnalogButtons[XBOX_BUTTON_RTRIGGER] = right;
+    }
 
-    /* SDL Y axis points down; the Xbox Y axis points up -- invert.
-     * Use (-1 - v) so v = -32768 does not overflow SHORT. */
-    pState->Gamepad.sThumbLX = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
-    pState->Gamepad.sThumbLY =
-        (SHORT)(-1 - SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY));
-    pState->Gamepad.sThumbRX = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTX);
-    pState->Gamepad.sThumbRY =
-        (SHORT)(-1 - SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTY));
+    /* SDL Y axis points down; the Xbox Y axis points up -- invert. Keep the
+     * strongest axis when a player has a thumb on both the overlay and a
+     * physical pad, rather than making either input unexpectedly disappear. */
+    {
+        SHORT axes[4];
+        axes[0] = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
+        axes[1] = (SHORT)(-1 - SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY));
+        axes[2] = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTX);
+        axes[3] = (SHORT)(-1 - SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTY));
+        if (abs(axes[0]) > abs(pState->Gamepad.sThumbLX)) pState->Gamepad.sThumbLX = axes[0];
+        if (abs(axes[1]) > abs(pState->Gamepad.sThumbLY)) pState->Gamepad.sThumbLY = axes[1];
+        if (abs(axes[2]) > abs(pState->Gamepad.sThumbRX)) pState->Gamepad.sThumbRX = axes[2];
+        if (abs(axes[3]) > abs(pState->Gamepad.sThumbRY)) pState->Gamepad.sThumbRY = axes[3];
+    }
 
     return ERROR_SUCCESS;
 }
@@ -380,6 +423,10 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
     return ERROR_SUCCESS;
 #else
     SDL_GameController *c = g_pads[dwPort];
+#if defined(__ANDROID__)
+    if (!c && dwPort == 0)
+        return ERROR_SUCCESS; /* touch pad has no motor, but vibration is optional */
+#endif
     if (!c) return ERROR_DEVICE_NOT_CONNECTED;
 
     /* SDL rumble needs a duration; refresh for ~1s on each call (the game
@@ -401,6 +448,16 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
     (void)dwFlags;
     if (dwPort >= XBOX_MAX_CONTROLLERS || !pCaps)
         return ERROR_DEVICE_NOT_CONNECTED;
+#if defined(__ANDROID__)
+    if (dwPort == 0) {
+        /* The touch overlay is a full virtual gamepad even with no SDL
+         * joystick attached. */
+        memset(pCaps, 0, sizeof(XBOX_INPUT_CAPABILITIES));
+        pCaps->Type = 1;
+        pCaps->SubType = 1;
+        return ERROR_SUCCESS;
+    }
+#endif
     if (!g_pads[dwPort])
         return ERROR_DEVICE_NOT_CONNECTED;
 

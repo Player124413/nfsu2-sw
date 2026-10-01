@@ -41,9 +41,14 @@ if(WIN32)
     # XAudio2Create rather than at build time here.
     target_link_libraries(xbox_apu PRIVATE platform kernel32 winmm xaudio2_8 ole32)
 else()
-    # Linux: platform layer (Win32 primitives on POSIX) + SDL2 audio + libm
-    find_package(SDL2 REQUIRED)
-    target_link_libraries(xbox_apu PRIVATE platform SDL2::SDL2 m)
+    # POSIX/Android: platform layer + SDL2 audio + libm. On Android the
+    # top-level project has already added SDL2 from ANDROID_SDL2_DIR.
+    if(ANDROID AND TARGET SDL2::SDL2)
+        target_link_libraries(xbox_apu PRIVATE platform SDL2::SDL2 m)
+    else()
+        find_package(SDL2 REQUIRED)
+        target_link_libraries(xbox_apu PRIVATE platform SDL2::SDL2 m)
+    endif()
 endif()
 
 # The APU raises its interrupt (xbox_set_irq_line) and resolves DMA addresses

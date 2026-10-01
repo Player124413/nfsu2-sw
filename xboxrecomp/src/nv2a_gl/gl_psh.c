@@ -307,7 +307,12 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
             "void main() {\n");
     else
     emit(&o,
+#if defined(NFSU2_ANDROID)
+        "#version 300 es\n"
+        "precision highp float; precision highp int;\n"
+#else
         "#version 330 core\n"
+#endif
         "in vec4 vD0; in vec4 vD1; in vec4 vT0; in vec4 vT1;\n"
         "in vec4 vT2; in vec4 vT3; in float vFog;\n"
         "uniform sampler2D t0; uniform sampler2D t1;\n"

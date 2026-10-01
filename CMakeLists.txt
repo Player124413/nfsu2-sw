@@ -3,8 +3,8 @@ cmake_minimum_required(VERSION 3.20)
 # ============================================================================
 # Need for Speed: Underground 2 (Xbox, NTSC-U) - Static Recompilation
 #
-# Hosts: Windows (MSVC, D3D11), Linux (GCC, SDL2 + OpenGL) and Nintendo
-# Switch homebrew (devkitA64 + libnx, built with switch/build.sh).
+# Hosts: Windows (MSVC, D3D11), Linux (GCC, SDL2 + OpenGL), Nintendo
+# Switch homebrew (devkitA64 + libnx), and Android 64-bit (NDK + SDL2).
 # ============================================================================
 
 project(nfsu2_recomp C)
@@ -35,6 +35,30 @@ endif()
 option(NFSU2_VULKAN "Render with Vulkan instead of OpenGL" OFF)
 set(XBOXRECOMP_VULKAN ${NFSU2_VULKAN} CACHE BOOL "" FORCE)
 
+# Android uses the official SDL2 Android backend for the window, audio and
+# physical controllers. SDL2 is intentionally not vendored in this repo (it
+# is a separately licensed/upstream dependency); point CMake at a checkout
+# with -DANDROID_SDL2_DIR=/path/to/SDL. The Android launcher documents the
+# exact checkout and Gradle invocation.
+if(ANDROID)
+    set(ANDROID_SDL2_DIR "" CACHE PATH
+        "SDL2 checkout containing android-project/ and CMakeLists.txt")
+    if(NOT EXISTS "${ANDROID_SDL2_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "Android builds need SDL2: pass -DANDROID_SDL2_DIR=/path/to/SDL")
+    endif()
+    add_subdirectory("${ANDROID_SDL2_DIR}" ${CMAKE_BINARY_DIR}/SDL2 EXCLUDE_FROM_ALL)
+    if(TARGET SDL2::SDL2)
+        # Official SDL2 exports this target.
+    elseif(TARGET SDL2)
+        add_library(SDL2::SDL2 ALIAS SDL2)
+    elseif(TARGET SDL2-static)
+        add_library(SDL2::SDL2 ALIAS SDL2-static)
+    else()
+        message(FATAL_ERROR "The SDL2 checkout did not provide SDL2::SDL2")
+    endif()
+endif()
+
 add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
 
 file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "${NFSU2_GEN_DIR}/*.c")
@@ -46,7 +70,14 @@ set(GAME_SOURCES
     src/text_patch.c
 )
 
-if(WIN32)
+if(ANDROID)
+    # SDL's Android glue calls SDL_main from its Activity. Keep the launcher
+    # and the title in one native library so it can use the same generated
+    # code and runtime as the desktop/Switch ports.
+    list(APPEND GAME_SOURCES src/android/android_bridge.c)
+    add_library(${PROJECT_NAME} SHARED ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME main)
+elseif(WIN32)
     add_executable(${PROJECT_NAME} WIN32 ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
 else()
     add_executable(${PROJECT_NAME} ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
@@ -74,6 +105,12 @@ endif()
 if(NFSU2_VULKAN)
     target_compile_definitions(${PROJECT_NAME} PRIVATE NFSU2_VULKAN=1)
 endif()
+if(ANDROID)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        NFSU2_ANDROID=1
+        SDL_MAIN_HANDLED
+    )
+endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -88,18 +125,25 @@ if(WIN32)
         target_link_options(${PROJECT_NAME} PRIVATE /LARGEADDRESSAWARE)
         target_compile_options(${PROJECT_NAME} PRIVATE /bigobj)
     endif()
+elseif(ANDROID)
+    # SDL2 owns the Android surface and audio device. These are the small
+    # platform libraries used by the native bridge and the GLES renderer.
+    target_link_libraries(${PROJECT_NAME} PRIVATE android log GLESv3 OpenSLES dl m)
 else()
-    # The generated chunks are huge straight-line functions; -O1 keeps GCC's
-    # memory and time per chunk sane while still allocating registers. The
-    # Switch's CPU is the bottleneck there, so it gets -O2.
-    if(NINTENDO_SWITCH)
+    target_link_libraries(${PROJECT_NAME} PRIVATE m)
+endif()
+
+if(NOT WIN32)
+    # The generated chunks are huge straight-line functions; desktop GCC
+    # stays at O1 to keep compile memory sane, while ARM64 Switch/Android
+    # builds use O2 and keep more hot state in registers.
+    if(NINTENDO_SWITCH OR ANDROID)
         set(NFSU2_GEN_OPT "-O2" CACHE STRING "Optimisation for the lifted code")
     else()
         set(NFSU2_GEN_OPT "-O1" CACHE STRING "Optimisation for the lifted code")
     endif()
     set_source_files_properties(${RECOMP_GEN_SOURCES} PROPERTIES
         COMPILE_OPTIONS "${NFSU2_GEN_OPT};-w;-fno-strict-aliasing;-fwrapv")
-    target_link_libraries(${PROJECT_NAME} PRIVATE m)
 endif()
 
 # ── Nintendo Switch homebrew (devkitA64 + libnx) ────────────────

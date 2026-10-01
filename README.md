@@ -1,8 +1,9 @@
 # Need for Speed: Underground 2 — Xbox static recompilation
 
 The Xbox (NTSC-U) release of NFSU2, lifted to C with
-[xboxrecomp](https://github.com/sp00nznet/xboxrecomp) and built for Linux and
-Nintendo Switch homebrew (libnx NRO).
+[xboxrecomp](https://github.com/sp00nznet/xboxrecomp) and built for Linux,
+Nintendo Switch homebrew (libnx NRO), and an Android 64-bit SDL2 target with
+an in-app launcher and multi-touch controls.
 
 No game data is included. You need your own copy of the disc, extracted
 (`default.xbe`, `NFSUNDER/`, ...).
@@ -15,7 +16,8 @@ No game data is included. You need your own copy of the disc, extracted
 | `src/recomp_manual.c` | hand-written overrides of lifted functions |
 | `src/switch_nx.c` | Switch log device, env file, exception handler, loading screen |
 | `config/seed_functions.json` | entry points the static pass cannot see |
-| `xboxrecomp/` | the toolkit (MIT), vendored with this port's changes: NV2A OpenGL renderer, SDL audio, Switch platform layer, translator fixes |
+| `android/` | Android Studio launcher, SAF game import, SDL Activity and multi-touch controls |
+| `xboxrecomp/` | the toolkit (MIT), vendored with this port's changes: NV2A OpenGL renderer, SDL audio, Switch/Android platform layers, translator fixes |
 | `tools/regen.sh` | XBE → lifted C (`gen/`, never committed) |
 | `switch/build.sh` | Switch NRO build + SD-card staging |
 
@@ -32,7 +34,17 @@ NFSU2_GAME_DIR=/path/to/game build/nfsu2_recomp
 
 # 2b. Nintendo Switch (devkitA64, switch-sdl2, switch-mesa)
 NFSU2_GEN_DIR=/path/to/gen NFSU2_GAME_SRC=/path/to/game switch/build.sh
+
+# 2c. Android arm64/x86_64 (Android Studio + official SDL2 checkout)
+gradle -p android :app:assembleRelease \
+  -Psdl2.dir=/path/to/SDL2 -Pnfsu2.gen.dir=/path/to/gen
 ```
+
+The Android launcher imports an extracted disc through the system folder picker,
+validates `default.xbe`, and exposes a 60 Hz pacing toggle and render scale.
+See [`android/README.md`](android/README.md). A 60 FPS target is not an honest
+hardware guarantee for every 64-bit phone; sustained performance must be
+validated on the target device and can be lowered to 0.75x in the launcher.
 
 On the Switch the NRO reads the **extracted** disc from
 `sdmc:/switch/nfsu2x/game/`. Launch it with title takeover (hold R on a game)

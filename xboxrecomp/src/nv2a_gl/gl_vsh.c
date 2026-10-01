@@ -298,7 +298,12 @@ const char *nv2a_gl_vsh_prelude(void)
     if (nv2a_shader_vk)
         return s_vk_prelude;
     return
+#if defined(NFSU2_ANDROID)
+        "#version 300 es\n"
+        "precision highp float; precision highp int;\n"
+#else
         "#version 330 core\n"
+#endif
         "layout(location = 0) in vec4 v0;\n"
         "layout(location = 1) in vec4 v1;\n"
         "layout(location = 2) in vec4 v2;\n"
