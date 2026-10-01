@@ -41,6 +41,7 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "${NFSU2_GEN_DIR}/*.c")
 
 set(GAME_SOURCES
     src/main.c
+    src/data_init.c
     src/recomp_manual.c
     src/switch_nx.c
     src/text_patch.c
@@ -112,7 +113,7 @@ if(NINTENDO_SWITCH)
     set(NFSU2_SWITCH_APP_NAME "NFS Underground 2 (Xbox recomp)" CACHE STRING
         "Title shown in the homebrew menu")
     set(NFSU2_SWITCH_AUTHOR "nfsu2-xbox" CACHE STRING "Author shown in the homebrew menu")
-    set(NFSU2_SWITCH_VERSION "0.3.5" CACHE STRING "Version shown in the homebrew menu")
+    set(NFSU2_SWITCH_VERSION "0.3.6" CACHE STRING "Version shown in the homebrew menu")
     set(NFSU2_SWITCH_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.jpg" CACHE FILEPATH
         "256x256 JPEG icon (libnx default when empty)")
 

@@ -931,6 +931,26 @@ void switch_boot(void)
     prof_start();
 }
 
+void switch_error_dialog(const char *msg, const char *details)
+{
+    AppletType at = appletGetAppletType();
+    Result rc;
+    log_flush(1);
+    if (at == AppletType_Application || at == AppletType_SystemApplication) {
+        ErrorApplicationConfig c;
+        rc = errorApplicationCreate(&c, msg, details);
+        if (R_SUCCEEDED(rc))
+            rc = errorApplicationShow(&c);
+    } else {
+        ErrorSystemConfig c;
+        rc = errorSystemCreate(&c, msg, details);
+        if (R_SUCCEEDED(rc))
+            rc = errorSystemShow(&c);
+    }
+    if (R_FAILED(rc))
+        fprintf(stderr, "[switch] error applet failed (0x%X)\n", rc);
+}
+
 void switch_shutdown(void)
 {
     log_flush(1);
