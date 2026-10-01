@@ -166,6 +166,11 @@ typedef struct {
  * RECOMP_GL_DIRECT=0 turns it off at run time. */
 #define NV2A_BACKEND_RAW_DIRECT 0x1u
 
+/* Optional, set by the game project: sees every raw batch just before the
+ * back end gets it and may change it. attrs is rb->attrs, writable; an
+ * attribute moved from attr_direct to attrs[] must have its bit cleared. */
+extern void (*nv2a_raw_batch_hook)(Nv2aRawBatch *rb, float *attrs);
+
 /* Register (or, with NULL, remove) the back end. Call before the title starts
  * submitting work; the executor must also be enabled (RECOMP_PB_EXEC). */
 void nv2a_backend_register(const Nv2aBackend *backend);

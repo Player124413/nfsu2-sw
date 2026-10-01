@@ -293,6 +293,14 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   (w < 0) got z = 0 instead of ~w and skewed depth across the eye plane;
   now clamped only when w > 0. Found on lavapipe by reading one pixel back
   after every draw (GL vs VK, same frame) -- an ad-hoc probe, not in tree.
+- **Black loading screen main menu -> Career / Quick Race (fixed
+  2026-10-01, GL and VK):** nv2a_pb_exec_method wrote methods of every
+  subchannel into the 3D register shadow. The loading screen's draws then
+  had culling on (cull FRONT, front CW -- the menu car's state; menu 2D
+  draws have it off), and its quads are CW, so all were culled. Likely
+  culprit: NV062 SET_OFFSET_SOURCE = 0x0308 = SET_CULL_FACE_ENABLE from a
+  blit (not traced per method). The old swapped VK winding had hidden it.
+  Only subchannel 0 goes into the shadow now.
 - **Eden cannot run NVK** (2026-09-29): instance, device, swapchain (only
   IMMEDIATE; FIFO creation hangs) and command recording work, but no GPU
   submission ever completes -- vktest's first fence times out (also with
@@ -399,12 +407,21 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   sub_0026144D reports). Planes are bottom-up, Y stride +0x1B8 / UV +0x1BC,
   offsets +0x21C/+0x220/+0x224, 48/24-pixel border (left unfilled).
   `NFSU2_NATIVE_VP6=0` lifted decoder, `=2` both + compare (Linux: 2100
-  frames bit-exact). FFmpeg is a minimal **LGPL** build, vp6 decoder only
+  frames bit-exact). The YUV -> A8R8G8B8 row converter `sub_0025ECB4`
+  (MMX tables at 0x3D0810/1010/1810, called by sub_0025F0B7 per row) stays
+  after FFmpeg; native in recomp_manual.c since 2026-10-01 (bit-exact,
+  RECOMP_NATIVE=0 / RECOMP_NATIVE_CHECK=1). FFmpeg is a minimal **LGPL** build, vp6 decoder only
   (`tools/build_ffmpeg_vp6.sh switch|linux` -> /root/nfsu2x/ffmpeg-vp6-*;
   CMake `-DNFSU2_FFMPEG_DIR`, switch/build.sh `FFMPEG_DIR`). devkitPro's
   switch-ffmpeg is `--enable-gpl` -- don't link it. Log: `[movie] VP6: n
   frames, x ms average`. Linux x86 (plain C): ~1 ms/frame.
-- (Before the FFmpeg decoder) movie decoding ran on the game thread: MMX IDCT `sub_0026EB34`, MC
+- Movies: ealogo, THX_LOGO, PSA, FMVOpening (trailer before Press Start);
+  names logged by the sub_00129610 wrapper (`[movie] MOVIES\\...`). In 16:9
+  src/movie_crop.c (via `nv2a_raw_batch_hook`, executor -> GL/VK) scales
+  FMVOpening's quad (clip +-1, vertex program, 0.675 of the width) by
+  1/0.675 so the letterboxed film fills the screen. NFSU2_MOVIE_CROP=0 off,
+  NFSU2_MOVIE_TRACE=1 logs movie draws.
+- (Before the FFmpeg decoder) movie decoding ran on the game thread: MMX IDCT `sub_0026EB34`, YUV->RGB
   `sub_0025ECB4`, `sub_0026FBB1` (Linux perf of the movies). The translator
   keeps registers of MMX *leaf* functions in shadowing C locals
   (`_localize_leaf_registers`, `recomp_leaf_ld_*`/`st_*`; 21 functions,
