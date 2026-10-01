@@ -562,6 +562,69 @@ extern void sub_002618F0_gen(void);
 void sub_002618F0(void) { sub_002618F0_gen(); }
 #endif
 
+/* ── 4x4 matrix multiply, sub_002213EA ─────────────────────────
+ *
+ * stdcall (out, a, b), ret 12, eax = out: out = a * b, row-major floats, in
+ * SSE (shufps a[i][j] across the row, mulps by row j of b, addps). Every
+ * xmm register of the lifted body is thread-local, so each call was ~100
+ * TLS accesses (calls on Horizon). sub_000A2EA0 calls it twice per object
+ * drawn; at a drag start line (Coastal Express, ~2300 draws a frame) it was
+ * 15-18% of the main thread on x86, native -22% main-thread time per frame.
+ * Same sums in the same order, ((p0 + p1) + p2) + p3, no FMA contraction;
+ * all rows are computed before the store, as out may alias a or b.
+ * RECOMP_NATIVE=0 lifted, RECOMP_NATIVE_CHECK=1 both and compare (Linux race:
+ * 0 mismatches in 4.4M calls). */
+extern void sub_002213EA_gen(void);
+
+__attribute__((optimize("fp-contract=off")))
+static void mat4_mul(float *o, const float *a, const float *b)
+{
+    float r[16];
+    int i, k;
+    for (i = 0; i < 4; i++)
+        for (k = 0; k < 4; k++) {
+            float s = a[4 * i] * b[k];
+            s = s + a[4 * i + 1] * b[4 + k];
+            s = s + a[4 * i + 2] * b[8 + k];
+            s = s + a[4 * i + 3] * b[12 + k];
+            r[4 * i + k] = s;
+        }
+    memcpy(o, r, sizeof r);
+}
+
+void sub_002213EA(void)
+{
+    static int mode = -1;               /* 0 lifted, 1 native, 2 native + check */
+    uint32_t out = MEM32(esp + 4), a = MEM32(esp + 8), b = MEM32(esp + 12);
+
+    if (mode < 0) {
+        const char *e = getenv("RECOMP_NATIVE"), *c = getenv("RECOMP_NATIVE_CHECK");
+        mode = (e && *e == '0') ? 0 : (c && *c == '1') ? 2 : 1;
+    }
+    if (mode == 0) {
+        sub_002213EA_gen();
+        return;
+    }
+    if (mode == 2) {
+        static unsigned long calls, bad;
+        float o[16], ma[16], mb[16];
+        memcpy(ma, (const void *)XBOX_PTR(a), 64);
+        memcpy(mb, (const void *)XBOX_PTR(b), 64);
+        mat4_mul(o, ma, mb);
+        sub_002213EA_gen();             /* pops its own arguments */
+        calls++;
+        if (memcmp(o, (const void *)XBOX_PTR(out), 64) && bad++ < 20)
+            fprintf(stderr, "[native] sub_002213EA mismatch: out %08X a %08X b %08X\n",
+                    out, a, b);
+        if ((calls & 0xFFFFF) == 0)
+            fprintf(stderr, "[native] sub_002213EA: %lu calls, %lu mismatches\n", calls, bad);
+        return;
+    }
+    mat4_mul((float *)XBOX_PTR(out), (const float *)XBOX_PTR(a), (const float *)XBOX_PTR(b));
+    eax = out;
+    esp += 16;                          /* return address + three arguments */
+}
+
 /* ── Movie colour conversion, sub_0025ECB4 ───────────────────
  *
  * cdecl (y, u, v, dst, dst_end): one row of a VP6 picture to A8R8G8B8, two

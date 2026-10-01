@@ -214,14 +214,22 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   (root ports 1 and 2), routed by the ED's function address; pad 2 is
   plugged/unplugged as host pad 1 (Switch No2, SDL's second pad) comes and
   goes, after pad 1 is addressed. Switch: player 1 = handheld + No1, player 2
-  = No2; `RECOMP_NX_JOYCON=single` = one sideways Joy-Con per player
+  = No2, but with No2 empty handheld and No1 are two players -- without the
+  controller applet a second Joy-Con pair joining a handheld console lands in
+  No1 (it used to be player 1 too: "+ on the second pair does nothing").
+  Log `[NX] pads: player 1 = ...; player 2 = ...` on every change; `RECOMP_NX_JOYCON=single` = one sideways Joy-Con per player
   (`RECOMP_NX_JOYCON_ROTATE=0` if the stick comes out turned twice).
   `RECOMP_USB_PADS=1` = one pad; `RECOMP_USB_PORT2` moves pad 2.
   `RECOMP_PAD2_SCRIPT` scripts pad 2 (and keeps it plugged); log `PADn: step`.
   NFSU2: Main Menu -> right -> "2 Player Split-Screen"; at car select the
   players are whoever presses **Start** first ("Player One/Two Press START",
-  A does not count). Linux 2026-09-30: split-screen race starts with both
-  HUDs, but the GL renderer draws the 3D world black in split screen (open).
+  A does not count). **Black 3D in split screen (fixed 2026-10-01, GL and
+  VK):** each player's view is drawn with SET_SURFACE_CLIP = its 640x240
+  half, the HUD with 640x480. Surfaces were keyed by (address, clip size),
+  so every clip change rebuilt -- and cleared -- the back buffer; and the
+  clip was not a scissor. Now a surface is clip origin + size and only
+  grows, draws are scissored to the clip (like xemu), and a render target
+  sampled as a smaller texture gets its texcoords scaled (`rt_scale`).
   Menu dumps run ~60 frames/s: RECOMP_GL_DUMP=<p>,61 is about one a second.
 - Buttons map by label (Switch A = Xbox A); `RECOMP_PAD_LAYOUT=position`
   swaps to Xbox positions. Y opens the in-game Help box, closed with B.
@@ -568,6 +576,25 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   the jp branch). RECOMP_NATIVE=0 off, RECOMP_NATIVE_CHECK=1 runs both:
   0 mismatches in 8.4M + 3.1M calls over a Linux race. ~40% of the
   culling calls carry a matrix.
+- **FPS drop at some map points (2026-10-01; easiest: Quick Race -> Drag ->
+  Coastal Express start line):** a long sightline, ~2300 draws a frame (vs
+  ~930 once the camera moves, ~1500 in circuit races), about half of them
+  0 samples (behind walls / off screen; game culling, not ours:
+  RECOMP_NATIVE=0 gives the same counts). Game thread, executor and GL
+  thread all ~2x per frame. The track is locked in the test profile: the
+  console save (005213381338) is in /root/nfsu2x/game_drag (symlinks + own
+  UDATA). Path: Main Menu a, right x2 (Drag) a, right x3 a, a x5; without
+  throttle the car stays at the line = static, repeatable scene.
+  `sub_002213EA` (SSE 4x4 matrix multiply, stdcall out = a * b; twice per
+  object from sub_000A2EA0) was 15-18% of the game thread: every xmm
+  register is TLS. Native in recomp_manual.c (no FMA contraction, same sum
+  order; 0 mismatches in 7.3M calls); in-run A/B at the start line: main
+  thread 6.42 -> 5.42 ms/frame on x86. Also: calls to *wrapped* overrides
+  (sub_X around sub_X_gen) were emitted as RECOMP_ICALL_SAFE (trace write +
+  dispatch binary search per call, sub_0009A330 included); the lifter now
+  calls the wrapper directly (`Lifter.wrapped_functions`, test in
+  test_manual_call_dispatch.py). The renderer side (per-draw cost) is still
+  ~2x there.
 - **Race hitches (Eden, `[hitch]` lines: frames > 50 ms with programs
   compiled / textures uploaded and their time):**
   - race start: ~40 programs compiled in two frames (~40 ms each in Mesa,
