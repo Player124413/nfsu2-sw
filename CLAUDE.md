@@ -164,6 +164,14 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   profile 71.6% of the APU thread in that wait, APU 1124-1480 frames/s ->
   audio stutter. voice_lock now sets its bits atomically, without d->lock
   (the handover remains only for apu_mixer_play).
+- **Light line along the top and left edge** (open world/races, some
+  weather; fixed 2026-10-02, GL and VK): the glow passes draw a clip-space
+  full-screen triangle, and D3D's viewport offset is 320.53125/240.53125, so
+  its edge sat at 0.53125 > GL's pixel centre 0.5 -> row/column 0 of the
+  glow accumulator (0x82C17280) were never rewritten, and the composite
+  added that stale edge to screen row/column 1. NV2A snaps screen positions
+  to 1/16 px by truncation (xemu roundScreenCoords): `nv2a_snap` in
+  gl_vsh.c's nv2a_clip.
 - prof.bin sample times are 16 bits of 10 ms and wrap every 655 s;
   prof_report.py unwraps them (--time on long runs was empty before).
 - **Files:** no `open()` on directories (`XBOX_DIR_FD` sentinel); FAT can't
@@ -595,6 +603,61 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   calls the wrapper directly (`Lifter.wrapped_functions`, test in
   test_manual_call_dispatch.py). The renderer side (per-draw cost) is still
   ~2x there.
+- **More native leaves (2026-10-02, src/recomp_manual.c, Linux race perf
+  of the main thread):** `sub_002A68EC` = MSVC `_ftol2` (589 call sites,
+  top self time 4.4%), `sub_000A3CA0` (colour grade LUT, 64x64 x2, rebuilt
+  every race frame by sub_000A3FA0 when its params at 0x39D304 change; ~10x
+  faster), `sub_0004BC20` (point x 4x3 matrix), `sub_0004B260` (sine of a
+  16-bit angle, result on the x87 stack), `sub_001C6900` (sphere/plane
+  fade, int via cvttss2si), `sub_000113A0` (4x4 copy). All exact incl.
+  registers, g_fp_cc, g_ebp/g_seh_ebp, xmm0; RECOMP_NATIVE_CHECK=1: 0
+  mismatches (millions of calls each). Gotcha: `fcomp; test ah,5; jp`
+  jumps when C0 == C2, i.e. on >= or unordered (the "if (v < K)" idiom).
+  Then: `sub_001C3430` (max edge function, 3/4-gon), `sub_0004C6E0` (2D
+  overlap with margin), `sub_001C65D0` (int16 rows -> floats),
+  `sub_002EEA80` (D3D's SSE 4x4 multiply, xmm0-5 as left), `sub_0004B940`
+  (t = b * a, per-element sum order generated from the disassembly, then
+  sub_000113A0). On x86 the small leaves only gain ~30% (TLS is cheap
+  there); integer code that calls back into lifted code (sub_000ACB30 mesh
+  submit, sub_000AD7D0) is not worth it. Remaining by self time:
+  sub_001C69C0 (big, branchy), sub_002EC140 / sub_002E8D40 (D3D).
+- **Missing function 0x000930D0** (thiscall method after int3 padding,
+  called every race frame, never lifted): every Linux race logged ~10k
+  `[ICALL] Failed to resolve VA 0x000930D0` (each with a trace dump) and
+  skipped it; one run then fell to 4 fps. Seeded in
+  config/seed_functions.json (full regen: exactly one function added).
+- **LTO (2026-10-02):** CMake `NFSU2_LTO=ON` (+ `NFSU2_LTO_JOBS`) puts the
+  lifted code and recomp_manual.c through LTO; `LTO=1 bash switch/build.sh`
+  builds in `<build dir>-lto` and stages `nfsu2x[-vulkan]-lto.nro` next to
+  the normal NRO. Cheap: ~3 min, ~2 GB. On its own it inlines almost
+  nothing (1.3k of 63k direct calls): lifted functions exceed -O2's
+  max-inline-insns-auto. Declared `inline` + slow modes moved to a cold
+  noinline helper, `_ftol2` (sub_002A68EC) is inlined into all but 12 of
+  its 581 sites. x86 main-menu idle: LTO 0.92 vs 0.95 ms/frame median,
+  inside the +-15% noise. Linux LTO race in check mode clean. Console A/B
+  pending. Thread pointer: GCC calls __aarch64_read_tp once per function
+  (mrs tpidrro_el0 + ldr), so TLS is not a per-access cost.
+- **Vblank was slow (fixed 2026-10-02, kernel_bridge.c):** the tick was
+  `now + 16 ms` checked on the timer thread's 10 ms wait -- late, drifting,
+  ~46 Hz -- and NFSU2 flips every 2nd vblank: Linux races ran at 23 fps.
+  Now 59.94 Hz drift-free on a us clock, the timer thread wakes when it is
+  due (kernel_vblank_wait_ms): Linux race 23 -> 30 fps. `[fps]`/`[perf]`
+  lines show `vblank N Hz` (dips to ~50 Hz only at loading stalls, with
+  the old FLIP_STALL 250 ms timeouts). No VRR needed: D3D's flip queue
+  (sub_002F2080) flips a frame that missed its vblank as soon as it is
+  queued (immediate-when-late flag), so frame times are not quantised --
+  an adaptive vblank hold was tried and never triggered (trace: retires
+  8 ms after a vblank, no vblank between).
+- **Clocks (switch_nx.c, opt-in):** NFSU2_CPU_MHZ / NFSU2_GPU_MHZ /
+  NFSU2_MEM_MHZ via clkrst (8.0+) or pcv: highest listed rate <= the
+  request, caps 1785 / 921.6 / 1600, old rates restored on exit (atexit +
+  switch_shutdown), re-applied every second while focused (dock/sleep
+  reset them). Log `[clock] CPU 1020 -> 1785 MHz`. Not hardware-tested.
+- **Draw merging is not possible as is:** RECOMP_MERGE_STATS (removed
+  again) over a race: 0% of draws have state identical to the previous
+  one; ~45% differ only in vertex-program constants (per-object matrices),
+  11-15% in constants + vertex arrays. Merging would need instancing with
+  per-draw constants in the shaders.
 - **Race hitches (Eden, `[hitch]` lines: frames > 50 ms with programs
   compiled / textures uploaded and their time):**
   - race start: ~40 programs compiled in two frames (~40 ms each in Mesa,

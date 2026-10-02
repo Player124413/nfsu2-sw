@@ -2036,7 +2036,11 @@ static void gl_flip(void)
             clock_gettime(CLOCK_MONOTONIC, &now);
             dt = (double)(now.tv_sec - last.tv_sec) + (now.tv_nsec - last.tv_nsec) / 1e9;
             if (dt >= 10.0) {
-                fprintf(stderr, "[fps] %.1f fps (frame %u)\n", (s_frame - last_frame) / dt, s_frame);
+                extern void xbox_vblank_report(double, char *, size_t);
+                char vb[128];
+                xbox_vblank_report(dt, vb, sizeof vb);
+                fprintf(stderr, "[fps] %.1f fps (frame %u), %s\n",
+                        (s_frame - last_frame) / dt, s_frame, vb);
                 last_frame = s_frame;
                 last = now;
             }
