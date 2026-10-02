@@ -35,7 +35,6 @@ void switch_error_dialog(const char *msg, const char *details);
 int SDL_ShowSimpleMessageBox(uint32_t flags, const char *title, const char *message,
                              void *window);
 #endif
-int nfsu2_data_init(const char *game_dir, const void *xbe, size_t xbe_size);
 
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
@@ -340,13 +339,6 @@ static int game_main(void)
         return 1;
     }
     printf("XBE %s: %zu bytes\n", xbe_path, xbe_size);
-
-    if (!nfsu2_data_init(game_dir, xbe_data, xbe_size)) {
-        fatal("Unsupported game data. Use an unmodified Xbox NTSC-U disc of "
-              "Need for Speed: Underground 2.");
-        free(xbe_data);
-        return 1;
-    }
 
     if (!xbox_MemoryLayoutInit(xbe_data, xbe_size)) {
         fatal("Failed to initialise the Xbox memory layout "

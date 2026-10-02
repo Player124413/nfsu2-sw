@@ -41,7 +41,6 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "${NFSU2_GEN_DIR}/*.c")
 
 set(GAME_SOURCES
     src/main.c
-    src/data_init.c
     src/recomp_manual.c
     src/switch_nx.c
     src/text_patch.c
