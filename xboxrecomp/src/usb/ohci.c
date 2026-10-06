@@ -150,6 +150,13 @@ static void wr32(uint32_t va, uint32_t v);
 typedef struct {
     uint32_t base;                      /* Xbox VA of the register block   */
     uint32_t reg[OHCI_REG_MAX / 4];
+#if defined(__ANDROID__)
+    /* Some externally prepared generated archives predate --mmio-sections
+     * XPP. Android cannot use the desktop fault handler, so those builds
+     * access the OHCI aperture as ordinary guest memory. Mirror the model's
+     * registers into that aperture and import direct guest writes here. */
+    uint32_t plain_seen[OHCI_REG_MAX / 4];
+#endif
     unsigned reads, writes, decode_fail;
     int      index;
     int      periodic_seen;
@@ -1091,6 +1098,36 @@ static void ohci_plug(OhciController *hc, unsigned d, int on)
     hc->reg[HcInterruptStatus / 4] |= INTR_RHSC;
 }
 
+#if defined(__ANDROID__)
+/*
+ * The normal Android build rewrites XPP accesses through xbox_mmio_read/write.
+ * A generated-code archive supplied to CI may have been produced before that
+ * rewrite was enabled, however. In that case the title reads and writes the
+ * plain MCPX mapping while the OHCI model only sees its private register array;
+ * the controller never observes HcControl becoming operational and the title
+ * waits forever during input setup.
+ *
+ * Keep a small compatibility bridge for Android. It is deliberately limited
+ * to the OHCI register block, not a global reinterpretation of guest memory:
+ * direct guest writes are imported, model state is published for direct guest
+ * reads, and MMIO-rewritten accesses continue to use the normal callbacks.
+ */
+static void ohci_sync_plain_registers(OhciController *hc)
+{
+    volatile uint32_t *plain = (volatile uint32_t *)
+        ((uintptr_t)xbox_GetMemoryOffset() + hc->base);
+    unsigned i;
+
+    for (i = 0; i < OHCI_REG_MAX / 4; i++) {
+        uint32_t value = plain[i];
+        if (value != hc->plain_seen[i])
+            ohci_write(hc, i * 4, value, 4);
+        plain[i] = hc->reg[i];
+        hc->plain_seen[i] = hc->reg[i];
+    }
+}
+#endif
+
 static DWORD WINAPI ohci_thread(LPVOID unused)
 {
     /* This thread calls recompiled code, so it needs what any thread running
@@ -1128,6 +1165,9 @@ static DWORD WINAPI ohci_thread(LPVOID unused)
         uint32_t control, enable, status;
 
         Sleep(OHCI_TICK_MS);
+#if defined(__ANDROID__)
+        ohci_sync_plain_registers(hc);
+#endif
         control = hc->reg[HcControl / 4];
         enable  = hc->reg[HcInterruptEnable / 4];
 
