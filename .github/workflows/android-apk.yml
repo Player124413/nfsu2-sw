@@ -101,6 +101,21 @@ jobs:
             https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/SDL2"
           test -f "$RUNNER_TEMP/SDL2/CMakeLists.txt"
           test -f "$RUNNER_TEMP/SDL2/android-project/app/src/main/java/org/libsdl/app/SDLActivity.java"
+          # SDL 2.30.0 still calls the deprecated ALooper_pollAll API. NDK 27
+          # marks it unavailable, although this non-blocking sensor poll only
+          # needs the one-event ALooper_pollOnce equivalent.
+          python3 - "$RUNNER_TEMP/SDL2/src/sensor/android/SDL_androidsensor.c" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          source = path.read_text(encoding="utf-8")
+          old = "ALooper_pollAll(0, NULL, &events, (void **)&source)"
+          new = "ALooper_pollOnce(0, NULL, &events, (void **)&source)"
+          if old not in source:
+              raise SystemExit("Expected SDL sensor poll call was not found")
+          path.write_text(source.replace(old, new), encoding="utf-8")
+          PY
 
       - name: Restore prepared generated game code
         id: generated-cache
