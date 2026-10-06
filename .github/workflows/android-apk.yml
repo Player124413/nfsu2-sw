@@ -241,49 +241,83 @@ jobs:
         run: |
           set -euo pipefail
           build_tools="$ANDROID_SDK_ROOT/build-tools/35.0.0"
-          [[ -x "$build_tools/apksigner" && -x "$build_tools/zipalign" ]] || {
-            echo "Android build-tools 35.0.0 did not provide apksigner and zipalign" >&2
+          [[ -x "$build_tools/apksigner" && -x "$build_tools/zipalign" && -x "$build_tools/aapt2" ]] || {
+            echo "Android build-tools 35.0.0 did not provide aapt2, apksigner and zipalign" >&2
             find "$ANDROID_SDK_ROOT/build-tools" -maxdepth 2 \
-              \( -name apksigner -o -name zipalign \) -print >&2 || true
+              \( -name aapt2 -o -name apksigner -o -name zipalign \) -print >&2 || true
             exit 1
           }
           export PATH="$build_tools:$PATH"
-          apk_unsigned="$(find android/app/build/outputs/apk -type f -name '*unsigned.apk' | head -1)"
-          if [[ -z "$apk_unsigned" ]]; then
-            apk_unsigned="$(find android/app/build/outputs/apk -type f -name '*.apk' | head -1)"
-          fi
-          [[ -n "$apk_unsigned" && -f "$apk_unsigned" ]] || {
-            echo "Gradle did not produce an APK" >&2
+
+          # Do not take the first APK found anywhere under outputs: AGP may
+          # leave multiple variants or stale files there. Select the requested
+          # variant and fail if Gradle did not produce exactly one candidate.
+          variant="${{ inputs.build_type }}"
+          apk_dir="android/app/build/outputs/apk/$variant"
+          mapfile -t candidates < <(find "$apk_dir" -maxdepth 1 -type f -name '*.apk' -print 2>/dev/null | sort)
+          [[ "${#candidates[@]}" -eq 1 ]] || {
+            echo "Expected exactly one APK in $apk_dir, found ${#candidates[@]}" >&2
             find android/app/build/outputs -type f -print >&2 || true
             exit 1
           }
+          apk_input="${candidates[0]}"
+          [[ -s "$apk_input" ]] || {
+            echo "The selected APK is missing or empty: $apk_input" >&2
+            exit 1
+          }
+          # An APK is a ZIP container; test it before signing so a truncated
+          # Gradle output cannot be published as if it were installable.
+          unzip -t "$apk_input" >/dev/null
 
           final="$GITHUB_WORKSPACE/nfsu2x-android-${GITHUB_SHA::12}.apk"
-          if [[ "$apk_unsigned" == *unsigned.apk ]]; then
+          if [[ "$apk_input" == *unsigned.apk ]]; then
             keytool -genkeypair -v \
               -keystore "$RUNNER_TEMP/android-debug.keystore" \
               -storepass android -keypass android \
               -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
               -dname 'CN=Android Debug,O=NFSU2,C=US' >/dev/null 2>&1
             aligned="$RUNNER_TEMP/nfsu2x-aligned.apk"
-            zipalign -f -p 4 "$apk_unsigned" "$aligned"
+            zipalign -f -p 4 "$apk_input" "$aligned"
             apksigner sign --ks "$RUNNER_TEMP/android-debug.keystore" \
               --ks-pass pass:android --key-pass pass:android \
               --ks-key-alias androiddebugkey --out "$final" "$aligned"
           else
             # Debug variants are already signed by AGP's debug keystore.
-            cp "$apk_unsigned" "$final"
+            cp "$apk_input" "$final"
           fi
+
+          [[ -s "$final" ]] || { echo "Signed APK is missing or empty" >&2; exit 1; }
+          unzip -t "$final" >/dev/null
           apksigner verify --verbose "$final"
+          package_name="$($build_tools/aapt2 dump badging "$final" | sed -n "s/^package: name='\\([^']*\\)'.*/\\1/p" | head -1)"
+          [[ "$package_name" == com.nfsu2x* ]] || {
+            echo "Unexpected Android package in APK: '${package_name:-<none>}'" >&2
+            exit 1
+          }
           sha256sum "$final" | tee "$final.sha256"
           echo "path=$final" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK artifact
+      - name: Package verified APK as ZIP
+        id: package
+        run: |
+          set -euo pipefail
+          final="${{ steps.apk.outputs.path }}"
+          bundle="$GITHUB_WORKSPACE/nfsu2x-android-${GITHUB_SHA::12}.zip"
+          rm -f "$bundle" "$bundle.sha256"
+          # Ship only the APK that passed ZIP integrity, package-name and
+          # apksigner checks, together with its checksum.
+          zip -q -j "$bundle" "$final" "$final.sha256"
+          unzip -t "$bundle" >/dev/null
+          unzip -l "$bundle"
+          sha256sum "$bundle" | tee "$bundle.sha256"
+          echo "path=$bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified APK ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nfsu2x-android-${{ inputs.build_type }}
+          name: nfsu2x-android-${{ inputs.build_type }}-zip
           if-no-files-found: error
           path: |
-            ${{ steps.apk.outputs.path }}
-            ${{ steps.apk.outputs.path }}.sha256
+            ${{ steps.package.outputs.path }}
+            ${{ steps.package.outputs.path }}.sha256
           retention-days: 14

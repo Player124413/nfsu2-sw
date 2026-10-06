@@ -30,8 +30,9 @@ Provide a URL to an archive containing the generated C directory, or configure
 `NFSU2_GEN_URL` as a repository secret. The archive must contain exactly one
 `recomp_funcs.h` next to the generated `.c` files. The workflow also accepts an
 optional URL to your own `default.xbe` and can run `tools/regen.sh`; game data
-and generated code are never committed. It uploads a signed, installable APK
-and a SHA-256 file as an Actions artifact.
+and generated code are never committed. It verifies the expected APK, checks its ZIP structure, package name and
+signature, then uploads the verified APK together with its checksum inside a
+ZIP archive as the Actions artifact.
 
 For local builds, install `android/app/build/outputs/apk/release/app-release.apk`.
 The launcher supports both the Storage Access Framework directory picker and
