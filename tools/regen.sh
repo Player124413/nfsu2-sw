@@ -7,6 +7,7 @@
 #   XBOXRECOMP_DIR  toolkit            (default: the vendored xboxrecomp/)
 #   NFSU2_XBE       default.xbe        (default: /root/nfsu2x/game/default.xbe)
 #   NFSU2_GEN_DIR   output directory   (default: /root/nfsu2x/gen)
+#   NFSU2_ANALYSIS_JSON  XBE metadata sidecar (default: next to the XBE)
 #   LIFT_ONLY=1     skip disasm/func_id/abi (enough after editing
 #                   recomp_manual.c; seeds need the full run)
 #
@@ -25,7 +26,19 @@ GEN="${NFSU2_GEN_DIR:-/root/nfsu2x/gen}"
 
 cd "$TK"
 if [ "${LIFT_ONLY:-0}" != "1" ]; then
-    python3 -m tools.disasm "$XBE" --seed-functions "$HERE/config/seed_functions.json"
+    # The disassembler needs the parser's section/import metadata.  Do not
+    # rely on the XBE being accompanied by a sidecar: CI downloads the XBE to
+    # a temporary directory, and user-provided XBE files often have no JSON
+    # next to them.  Keep an explicit override for callers that already have
+    # a reviewed analysis file.
+    ANALYSIS_JSON="${NFSU2_ANALYSIS_JSON:-${XBE%.*}_analysis.json}"
+    mkdir -p "$(dirname "$ANALYSIS_JSON")"
+    if [ ! -f "$ANALYSIS_JSON" ]; then
+        echo "Generating XBE analysis metadata: $ANALYSIS_JSON"
+        python3 -m tools.xbe_parser "$XBE" --json "$ANALYSIS_JSON" --quiet
+    fi
+    python3 -m tools.disasm "$XBE" --analysis-json "$ANALYSIS_JSON" \
+        --seed-functions "$HERE/config/seed_functions.json"
     python3 -m tools.func_id "$XBE"
     python3 -m tools.abi_analysis "$XBE"
 fi
