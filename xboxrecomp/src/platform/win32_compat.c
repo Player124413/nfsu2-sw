@@ -28,6 +28,17 @@
 #include <unistd.h>
 #include <sched.h>
 #include <fenv.h>
+#if defined(__ANDROID__)
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+/* NDK headers no longer expose the legacy ashmem ioctl definitions, but
+ * Android devices predating memfd still provide /dev/ashmem. */
+#ifndef ASHMEM_NAME_LEN
+#define ASHMEM_NAME_LEN 256
+#define ASHMEM_SET_NAME _IOW('a', 1, char[ASHMEM_NAME_LEN])
+#define ASHMEM_SET_SIZE _IOW('a', 3, size_t)
+#endif
+#endif
 #if defined(__SWITCH__)
 /* Horizon: no mmap. Memory is kernel objects mapped at chosen addresses
  * (see "Virtual memory" below). Only the kernel headers are pulled in --
@@ -883,6 +894,12 @@ void xbox_guest_pin(int interrupt)
     if (interrupt)
         svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2C);
 #else
+#if defined(__ANDROID__)
+    /* Bionic intentionally does not expose pthread_setaffinity_np. Android
+     * may move app threads between big and little cores, so leave scheduling
+     * to the system rather than relying on a non-portable declaration. */
+    (void)interrupt;
+#else
     {
         cpu_set_t set;
         CPU_ZERO(&set);
@@ -890,6 +907,7 @@ void xbox_guest_pin(int interrupt)
         pthread_setaffinity_np(pthread_self(), sizeof set, &set);
         (void)interrupt;
     }
+#endif
 #endif
 }
 
@@ -1161,7 +1179,14 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
 {
     w32_object *o = obj_from(h);
     if (!o || o->kind != K_THREAD) return FALSE;
+#if !defined(__ANDROID__)
     pthread_cancel(o->thread);
+#else
+    /* Bionic deliberately omits pthread cancellation. There are no callers
+     * in the Android runtime that require asynchronous termination; record the
+     * Win32 state and let a worker finish its current operation instead of
+     * calling an unavailable API or sending a process-fatal signal. */
+#endif
     pthread_mutex_lock(&o->lock);
     o->exit_code = exitCode;
     o->exited    = 1;
@@ -1992,6 +2017,12 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
 {
 #if defined(__APPLE__)
     memset_s(ptr, cnt, 0, cnt);
+#elif defined(__ANDROID__)
+    /* Android's libc does not expose explicit_bzero. A volatile byte loop
+     * prevents the compiler from removing this security-sensitive clear. */
+    volatile unsigned char *bytes = (volatile unsigned char *)ptr;
+    while (cnt--)
+        *bytes++ = 0;
 #else
     explicit_bzero(ptr, cnt);
 #endif
@@ -2398,8 +2429,10 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
 }
 #else
 /* An unnamed file descriptor that ftruncate and mmap both accept. Linux has
- * memfd_create for this; elsewhere an immediately-unlinked temp file does. */
-static int anon_map_fd(const char *name)
+ * memfd_create for this; Android exposes the same kernel primitive but not
+ * the GNU libc declaration, so use the syscall and retain an ashmem fallback.
+ * Elsewhere an immediately-unlinked temp file does. */
+static int anon_map_fd(const char *name, SIZE_T size)
 {
 #if defined(__APPLE__)
     static volatile LONG map_counter = 0;
@@ -2410,7 +2443,43 @@ static int anon_map_fd(const char *name)
     int fd = shm_open(shm_name, O_CREAT | O_RDWR | O_EXCL, 0600);
     if (fd >= 0) shm_unlink(shm_name);
     return fd;
+#elif defined(__ANDROID__)
+    int fd;
+#if defined(__NR_memfd_create)
+    fd = (int)syscall(__NR_memfd_create, name ? name : "xbox_map", 0);
+#elif defined(__aarch64__)
+    fd = (int)syscall(279 /* __NR_memfd_create */, name ? name : "xbox_map", 0);
+#elif defined(__x86_64__)
+    fd = (int)syscall(319 /* __NR_memfd_create */, name ? name : "xbox_map", 0);
+#elif defined(__i386__)
+    fd = (int)syscall(356 /* __NR_memfd_create */, name ? name : "xbox_map", 0);
 #else
+    fd = -1;
+#endif
+    if (fd >= 0)
+        return fd;
+
+    /* Older Android kernels provide ashmem instead of memfd. This path is
+     * only a compatibility fallback; modern Android normally takes memfd. */
+    {
+        char ashmem_name[ASHMEM_NAME_LEN];
+        int rc;
+        fd = open("/dev/ashmem", O_RDWR | O_CLOEXEC);
+        if (fd < 0)
+            return -1;
+        snprintf(ashmem_name, sizeof ashmem_name, "%s",
+                 name ? name : "xbox_map");
+        rc = ioctl(fd, ASHMEM_SET_NAME, ashmem_name);
+        if (rc == 0)
+            rc = ioctl(fd, ASHMEM_SET_SIZE, (size_t)size);
+        if (rc != 0) {
+            close(fd);
+            return -1;
+        }
+        return fd;
+    }
+#else
+    (void)size;
     return memfd_create(name ? name : "xbox_map", 0);
 #endif
 }
@@ -2422,7 +2491,7 @@ HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
     SIZE_T size = ((SIZE_T)maxSizeHigh << 32) | maxSizeLow;
     if (size == 0) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
 
-    int fd = anon_map_fd(name);
+    int fd = anon_map_fd(name, size);
     if (fd < 0) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
     if (ftruncate(fd, (off_t)size) != 0) {
         close(fd);
