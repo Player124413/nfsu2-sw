@@ -68,6 +68,11 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # Explicitly override the action default. The deprecated SDK
+          # package named `tools` must not be requested; cmdline-tools above
+          # is the supported replacement.
+          packages: platform-tools
 
       - name: Install Android NDK and CMake
         run: |
