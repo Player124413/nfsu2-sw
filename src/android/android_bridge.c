@@ -11,9 +11,11 @@
 #include <jni.h>
 
 #include <pthread.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../../xboxrecomp/src/input/android_input.h"
 
@@ -61,6 +63,30 @@ Java_com_nfsu2x_GameActivity_nativeSetGameDirectory(JNIEnv *env, jclass cls,
     if (s_game_dir[0])
         setenv("NFSU2_GAME_DIR", s_game_dir, 1);
     pthread_mutex_unlock(&s_config_lock);
+}
+
+JNIEXPORT void JNICALL
+Java_com_nfsu2x_GameActivity_nativeSetLogPath(JNIEnv *env, jclass cls,
+                                              jstring path)
+{
+    char value[1024];
+    int fd;
+    (void)cls;
+    copy_jstring(value, sizeof value, env, path);
+    if (!value[0])
+        return;
+
+    fd = open(value, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return;
+    /* Both streams go to one file so a crash report keeps the last native
+     * and game messages in their original order. */
+    if (dup2(fd, STDOUT_FILENO) >= 0)
+        dup2(fd, STDERR_FILENO);
+    close(fd);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    setenv("NFSU2_LOG_PATH", value, 1);
 }
 
 JNIEXPORT void JNICALL

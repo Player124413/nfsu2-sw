@@ -10,6 +10,7 @@ import org.libsdl.app.SDLActivity;
 /** SDL surface plus a low-latency Android touch overlay. */
 public final class GameActivity extends SDLActivity {
     public static final String EXTRA_GAME_DIR = "game_dir";
+    public static final String EXTRA_LOG_PATH = "log_path";
     public static final String EXTRA_RENDER_SCALE = "render_scale";
     public static final String EXTRA_VSYNC = "vsync";
 
@@ -21,6 +22,7 @@ public final class GameActivity extends SDLActivity {
     }
 
     private static native void nativeSetGameDirectory(String path);
+    private static native void nativeSetLogPath(String path);
     private static native void nativeSetRuntimeOptions(float scale, boolean vsync);
     public static native void nativeTouchState(int digital, byte[] analog,
                                                int lx, int ly, int rx, int ry);
@@ -33,9 +35,11 @@ public final class GameActivity extends SDLActivity {
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
 
         String path = getIntent().getStringExtra(EXTRA_GAME_DIR);
+        String logPath = getIntent().getStringExtra(EXTRA_LOG_PATH);
         float scale = getIntent().getFloatExtra(EXTRA_RENDER_SCALE, 1.0f);
         boolean vsync = getIntent().getBooleanExtra(EXTRA_VSYNC, true);
         nativeSetGameDirectory(path);
+        nativeSetLogPath(logPath);
         nativeSetRuntimeOptions(scale, vsync);
 
         super.onCreate(state);

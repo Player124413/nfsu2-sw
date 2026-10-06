@@ -34,11 +34,19 @@ and generated code are never committed. It uploads a signed, installable APK
 and a SHA-256 file as an Actions artifact.
 
 For local builds, install `android/app/build/outputs/apk/release/app-release.apk`.
-The launcher opens the Storage Access Framework directory picker. Select the root of the
-extracted disc, containing `default.xbe` and `NFSUNDER/`; it copies the files
-into the app's private directory and validates the XBE before enabling **Play**.
-The copy needs approximately the size of the extracted disc again as free
-space. App data can be removed from Android Settings to delete that copy.
+The launcher supports both the Storage Access Framework directory picker and
+**Install ISO / XISO**. Select the root of an extracted disc, containing
+`default.xbe` and `NFSUNDER/`, or select an Xbox XISO/ISO image; the app copies
+or extracts it into app-private storage and validates the XBE before enabling
+**Play**. The image is not uploaded anywhere and game data is not committed to
+this repository. Installation needs approximately the image size plus the
+extracted game size as temporary free space. App data can be removed from
+Android Settings to delete the installed copy.
+
+The launcher also keeps native stdout/stderr in `nfsu2_log.txt` under app-private
+storage. After a crash, reopen the launcher and press **Скопировать log.txt**
+to place the text in the clipboard for diagnostics. The copied log is limited
+to 4 MiB so it remains practical to paste into an issue or chat.
 
 ## Runtime design
 

@@ -1,6 +1,8 @@
 package com.nfsu2x;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
@@ -23,18 +25,23 @@ import android.widget.TextView;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
  * Small, dependency-free launcher. The user selects an extracted, legally
- * owned game directory through the Storage Access Framework; the launcher
- * copies it into app-private storage so the native title can use ordinary
- * POSIX paths. No broad storage permission is requested.
+ * owned game directory or Xbox XISO through the Storage Access Framework; the
+ * launcher copies/extracts it into app-private storage so the native title can
+ * use ordinary POSIX paths. No broad storage permission is requested.
  */
 public final class LauncherActivity extends Activity {
     private static final int PICK_GAME_DIRECTORY = 42;
+    private static final int PICK_GAME_IMAGE = 43;
     private static final String PREFS = "launcher";
     private static final String PREF_TREE = "game_tree";
     private static final String PREF_SCALE = "render_scale";
@@ -44,6 +51,7 @@ public final class LauncherActivity extends Activity {
     private TextView status;
     private Button play;
     private ProgressBar progress;
+    private Button copyLog;
     private Spinner scale;
     private android.widget.Switch vsync;
     private SharedPreferences prefs;
@@ -80,6 +88,7 @@ public final class LauncherActivity extends Activity {
         getWindow().setStatusBarColor(Color.rgb(8, 9, 13));
         getWindow().setNavigationBarColor(Color.rgb(8, 9, 13));
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        installCrashLogHandler();
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -112,14 +121,20 @@ public final class LauncherActivity extends Activity {
         TextView heading = label("Быстрый старт", 18, Color.WHITE);
         heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         panel.addView(heading, new LinearLayout.LayoutParams(-1, dp(32)));
-        TextView hint = label("Выберите папку с распакованной игрой. В ней должен "
-                + "лежать default.xbe и каталог NFSUNDER.", 13, Color.rgb(190, 197, 210));
+        TextView hint = label("Выберите папку с распакованной игрой или Xbox ISO/XISO. "
+                + "Нужны default.xbe и каталог NFSUNDER.", 13, Color.rgb(190, 197, 210));
         hint.setLineSpacing(0, 1.12f);
         panel.addView(hint, new LinearLayout.LayoutParams(-1, dp(48)));
 
         Button choose = action("Выбрать папку игры");
         panel.addView(choose, new LinearLayout.LayoutParams(-1, dp(50)));
         choose.setOnClickListener(v -> chooseGameDirectory());
+
+        Button chooseIso = action("Установить ISO / XISO");
+        LinearLayout.LayoutParams isoLp = new LinearLayout.LayoutParams(-1, dp(50));
+        isoLp.topMargin = dp(8);
+        panel.addView(chooseIso, isoLp);
+        chooseIso.setOnClickListener(v -> chooseGameImage());
 
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(100);
@@ -162,6 +177,13 @@ public final class LauncherActivity extends Activity {
         page.addView(play, playLp);
         play.setOnClickListener(v -> startGame());
 
+        copyLog = action("Скопировать log.txt");
+        copyLog.setEnabled(false);
+        LinearLayout.LayoutParams logLp = new LinearLayout.LayoutParams(-1, dp(46));
+        logLp.topMargin = dp(8);
+        page.addView(copyLog, logLp);
+        copyLog.setOnClickListener(v -> copyLogToClipboard());
+
         TextView footer = label("Сенсорные кнопки включаются автоматически в игре. "
                 + "Для максимальной производительности закройте фоновые приложения.",
                 11, Color.rgb(120, 130, 148));
@@ -181,25 +203,42 @@ public final class LauncherActivity extends Activity {
         startActivityForResult(i, PICK_GAME_DIRECTORY);
     }
 
+    private void chooseGameImage() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "application/octet-stream", "application/x-iso9660-image", "*/*"});
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(i, PICK_GAME_IMAGE);
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_GAME_DIRECTORY || resultCode != RESULT_OK || data == null)
+        if ((requestCode != PICK_GAME_DIRECTORY && requestCode != PICK_GAME_IMAGE)
+                || resultCode != RESULT_OK || data == null || data.getData() == null)
             return;
-        Uri tree = data.getData();
+        Uri selected = data.getData();
         try {
-            getContentResolver().takePersistableUriPermission(tree,
+            getContentResolver().takePersistableUriPermission(selected,
                     data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (SecurityException ignored) {
             // Some document providers do not offer persistable permissions;
             // the copy below still works for this launch.
         }
-        prefs.edit().putString(PREF_TREE, tree.toString()).apply();
-        copyGameInBackground(tree);
+        if (requestCode == PICK_GAME_DIRECTORY) {
+            prefs.edit().putString(PREF_TREE, selected.toString()).apply();
+            copyGameInBackground(selected);
+        } else {
+            extractGameImageInBackground(selected);
+        }
     }
 
     private void copyGameInBackground(final Uri tree) {
         play.setEnabled(false);
+        progress.setIndeterminate(true);
         progress.setVisibility(View.VISIBLE);
         status.setText("Проверка и копирование игры…");
         new Thread(() -> {
@@ -212,18 +251,7 @@ public final class LauncherActivity extends Activity {
                     throw new IllegalStateException("cannot create private game directory");
                 String rootId = DocumentsContract.getTreeDocumentId(tree);
                 copyChildren(tree, rootId, staging);
-                File xbe = findCaseInsensitive(staging, "default.xbe");
-                File data = findChildCaseInsensitive(staging, "NFSUNDER");
-                if (xbe == null || !xbe.isFile() || xbe.length() < 64)
-                    throw new IllegalStateException("default.xbe not found at the selected root");
-                if (data == null || !data.isDirectory())
-                    throw new IllegalStateException("NFSUNDER directory not found at the selected root");
-                // The native loader intentionally uses a stable lowercase name.
-                if (!xbe.getName().equals("default.xbe")) {
-                    File lower = new File(staging, "default.xbe");
-                    if (!xbe.renameTo(lower))
-                        throw new IllegalStateException("could not normalize default.xbe");
-                }
+                validateGame(staging);
                 deleteRecursive(destination);
                 if (!staging.renameTo(destination))
                     throw new IllegalStateException("could not commit the copied game");
@@ -236,6 +264,52 @@ public final class LauncherActivity extends Activity {
             if (ok)
                 handler.post(() -> setStatus("Игра готова • данные в защищённом хранилище", true));
         }, "game-copy").start();
+    }
+
+    private void extractGameImageInBackground(final Uri image) {
+        play.setEnabled(false);
+        progress.setIndeterminate(false);
+        progress.setProgress(0);
+        progress.setVisibility(View.VISIBLE);
+        status.setText("Распаковка ISO/XISO…");
+        new Thread(() -> {
+            File destination = new File(getFilesDir(), "game");
+            File staging = new File(getFilesDir(), "game.partial");
+            boolean ok = false;
+            try {
+                deleteRecursive(staging);
+                if (!staging.mkdirs() && !staging.isDirectory())
+                    throw new IllegalStateException("cannot create private game directory");
+                IsoExtractor.extract(getContentResolver(), image, staging,
+                        percent -> handler.post(() -> progress.setProgress(percent)));
+                validateGame(staging);
+                deleteRecursive(destination);
+                if (!staging.renameTo(destination))
+                    throw new IllegalStateException("could not commit extracted game");
+                ok = true;
+            } catch (Exception e) {
+                final String message = e.getMessage() == null ? "unknown error" : e.getMessage();
+                handler.post(() -> setStatus("Ошибка ISO: " + message, false));
+                deleteRecursive(staging);
+            }
+            if (ok)
+                handler.post(() -> setStatus("ISO установлена • игра готова", true));
+        }, "xiso-extract").start();
+    }
+
+    private static void validateGame(File root) throws Exception {
+        File xbe = findCaseInsensitive(root, "default.xbe");
+        File data = findChildCaseInsensitive(root, "NFSUNDER");
+        if (xbe == null || !xbe.isFile() || xbe.length() < 64)
+            throw new IllegalStateException("default.xbe not found at the image root");
+        if (data == null || !data.isDirectory())
+            throw new IllegalStateException("NFSUNDER directory not found at the image root");
+        // The native loader intentionally uses a stable lowercase name.
+        if (!xbe.getName().equals("default.xbe")) {
+            File lower = new File(root, "default.xbe");
+            if (!xbe.renameTo(lower))
+                throw new IllegalStateException("could not normalize default.xbe");
+        }
     }
 
     private void copyChildren(Uri tree, String documentId, File target) throws Exception {
@@ -323,7 +397,8 @@ public final class LauncherActivity extends Activity {
         if (game.isFile() && game.length() >= 64)
             setStatus("Игра готова • " + game.length() / (1024 * 1024) + " MB", true);
         else
-            setStatus("Выберите папку с распакованной игрой", false);
+            setStatus("Выберите папку с распакованной игрой или ISO/XISO", false);
+        updateLogButton();
     }
 
     private void setStatus(String text, boolean ready) {
@@ -331,6 +406,59 @@ public final class LauncherActivity extends Activity {
         status.setTextColor(ready ? Color.rgb(105, 218, 151) : Color.rgb(154, 164, 180));
         progress.setVisibility(View.GONE);
         play.setEnabled(ready);
+        updateLogButton();
+    }
+
+    private void updateLogButton() {
+        if (copyLog != null)
+            copyLog.setEnabled(new File(getFilesDir(), "nfsu2_log.txt").isFile());
+    }
+
+    private void copyLogToClipboard() {
+        File log = new File(getFilesDir(), "nfsu2_log.txt");
+        if (!log.isFile()) {
+            status.setText("Лог пока не создан");
+            return;
+        }
+        try {
+            long length = Math.min(log.length(), 4L * 1024 * 1024);
+            byte[] data = new byte[(int) length];
+            int used = 0;
+            try (FileInputStream input = new FileInputStream(log)) {
+                while (used < data.length) {
+                    int n = input.read(data, used, data.length - used);
+                    if (n < 0)
+                        break;
+                    used += n;
+                }
+            }
+            String text = new String(data, 0, used, StandardCharsets.UTF_8);
+            if (log.length() > length)
+                text = "[log truncated to 4 MiB]\n" + text;
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            clipboard.setPrimaryClip(ClipData.newPlainText("nfsu2_log.txt", text));
+            status.setText("log.txt скопирован в буфер обмена");
+        } catch (Exception e) {
+            status.setText("Не удалось скопировать лог: " + e.getMessage());
+        }
+    }
+
+    private void installCrashLogHandler() {
+        final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            File log = new File(getFilesDir(), "nfsu2_log.txt");
+            try (FileOutputStream output = new FileOutputStream(log, true)) {
+                StringWriter text = new StringWriter();
+                error.printStackTrace(new PrintWriter(text));
+                output.write(("\n[JAVA CRASH] " + thread.getName() + "\n"
+                        + text + "\n").getBytes(StandardCharsets.UTF_8));
+                output.flush();
+            } catch (Exception ignored) {
+                // Preserve the original crash behaviour if the log cannot be written.
+            }
+            if (previous != null)
+                previous.uncaughtException(thread, error);
+        });
     }
 
     private void startGame() {
@@ -341,6 +469,8 @@ public final class LauncherActivity extends Activity {
         Intent game = new Intent(this, GameActivity.class);
         game.putExtra(GameActivity.EXTRA_GAME_DIR,
                 new File(getFilesDir(), "game").getAbsolutePath());
+        game.putExtra(GameActivity.EXTRA_LOG_PATH,
+                new File(getFilesDir(), "nfsu2_log.txt").getAbsolutePath());
         game.putExtra(GameActivity.EXTRA_RENDER_SCALE, renderScale);
         game.putExtra(GameActivity.EXTRA_VSYNC, vsync.isChecked());
         startActivity(game);
