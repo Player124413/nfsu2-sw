@@ -66,6 +66,16 @@ The native path defaults to `RECOMP_GL_SCALE=1.0`, SDL swap interval 1 and the
 existing optimized renderer settings. `0.75x` is available for thermally
 constrained phones; `1.25x` is a quality option for stronger devices.
 
+Runtime saves are kept in the app-private `files/save` directory, separate from
+the imported `files/game` tree. This is intentional: Android's process working
+directory may be read-only, so the native bridge passes an absolute writable
+save path instead of allowing the Xbox path layer to fall back to `./.local`.
+When a title requests `HalReturnToFirmware`, Android uses the Win32
+`ExitProcess` equivalent without running C `atexit` teardown. Xbox titles can
+leave APU, renderer and timer workers active at that point; skipping global
+library teardown prevents those workers from locking already-destroyed SDL or
+pthread mutexes while the process exits.
+
 ## Performance expectations
 
 A 60 FPS target and frame pacing are implemented, but no software can honestly

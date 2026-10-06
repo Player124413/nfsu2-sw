@@ -437,7 +437,19 @@ int nfsu2_game_main(void)
 
     xbox_kernel_init();
     nfsu2_text_patch_init();
-    xbox_path_init(game_dir, NFSU2_DEFAULT_SAVE_DIR);
+
+    /* Android's process working directory is not writable. The JNI bridge
+     * derives an app-private save directory from the imported game path;
+     * using it here keeps TitleData/UserData/Cache out of the read-only CWD. */
+    const char *save_dir = NFSU2_DEFAULT_SAVE_DIR;
+#if defined(NFSU2_ANDROID)
+    {
+        const char *android_save_dir = getenv("NFSU2_SAVE_DIR");
+        if (android_save_dir && android_save_dir[0])
+            save_dir = android_save_dir;
+    }
+#endif
+    xbox_path_init(game_dir, save_dir);
     xbox_kernel_bridge_init();
 
     g_esp = XBOX_STACK_TOP;

@@ -60,8 +60,14 @@ Java_com_nfsu2x_GameActivity_nativeSetGameDirectory(JNIEnv *env, jclass cls,
     (void)cls;
     pthread_mutex_lock(&s_config_lock);
     copy_jstring(s_game_dir, sizeof s_game_dir, env, path);
-    if (s_game_dir[0])
+    if (s_game_dir[0]) {
+        char save_dir[1024];
         setenv("NFSU2_GAME_DIR", s_game_dir, 1);
+        /* Android has no writable process CWD. Keep Xbox TitleData,
+         * UserData and Cache beside the imported game in app-private files. */
+        snprintf(save_dir, sizeof save_dir, "%s/../save", s_game_dir);
+        setenv("NFSU2_SAVE_DIR", save_dir, 1);
+    }
     pthread_mutex_unlock(&s_config_lock);
 }
 

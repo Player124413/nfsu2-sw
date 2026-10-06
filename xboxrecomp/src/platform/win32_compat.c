@@ -1977,7 +1977,19 @@ VOID OutputDebugStringA(LPCSTR str)
     if (str) fputs(str, stderr);
 }
 
-VOID ExitProcess(UINT exitCode) { exit((int)exitCode); }
+/* Windows terminates the process immediately for ExitProcess; it does not
+ * run C atexit handlers. On Android this distinction matters: atexit and
+ * static teardown can destroy pthread mutexes while SDL/APU worker threads
+ * are still winding down, producing FORTIFY "destroyed mutex" aborts after
+ * HalReturnToFirmware. Let the kernel close the process instead. */
+VOID ExitProcess(UINT exitCode)
+{
+#if defined(__ANDROID__)
+    _exit((int)exitCode);
+#else
+    exit((int)exitCode);
+#endif
+}
 
 BOOL IsDebuggerPresent(void)
 {
