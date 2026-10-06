@@ -141,15 +141,12 @@ jobs:
             XBE_URL="${INPUT_XBE_URL:-${NFSU2_XBE_URL:-}}"
             XBE_SHA256="${INPUT_XBE_SHA256:-${NFSU2_XBE_SHA256:-}}"
             [[ -n "$XBE_URL" ]] || {
-              cat >&2 <<'EOF'
-No generated game code was supplied.
-
-Run this workflow with generated_source_url, or configure the private
-repository secret NFSU2_GEN_URL (and optionally NFSU2_GEN_TOKEN). As an
-alternative, provide xbe_url for your own legally owned default.xbe so the
-workflow can run tools/regen.sh. Game data and generated code are intentionally
-not committed to this repository.
-EOF
+              echo "No generated game code was supplied." >&2
+              echo >&2
+              echo "Run this workflow with generated_source_url, or configure the private" >&2
+              echo "repository secret NFSU2_GEN_URL (and optionally NFSU2_GEN_TOKEN)." >&2
+              echo "Alternatively, provide xbe_url for your own legally owned default.xbe." >&2
+              echo "Game data and generated code are intentionally not committed." >&2
               exit 1
             }
             xbe="$RUNNER_TEMP/xbe/default.xbe"
