@@ -10,7 +10,7 @@ on:
         required: false
         type: string
       generated_source_sha256:
-        description: Optional SHA-256 of generated_source_url (64 hex characters)
+        description: SHA-256 of generated_source_url; enables safe prepared-code cache reuse (64 hex characters)
         required: false
         type: string
       xbe_url:
@@ -20,7 +20,7 @@ on:
         required: false
         type: string
       xbe_sha256:
-        description: Optional SHA-256 of xbe_url (64 hex characters)
+        description: SHA-256 of xbe_url; enables safe prepared-code cache reuse (64 hex characters)
         required: false
         type: string
       build_type:
@@ -53,6 +53,10 @@ jobs:
       NFSU2_XBE_URL: ${{ secrets.NFSU2_XBE_URL }}
       NFSU2_XBE_TOKEN: ${{ secrets.NFSU2_XBE_TOKEN }}
       NFSU2_XBE_SHA256: ${{ secrets.NFSU2_XBE_SHA256 }}
+      # A verified source hash makes the generated-code cache reusable across
+      # workflow runs. Without one, use the run ID so an unverified remote
+      # archive can never silently replace newly downloaded game code.
+      NFSU2_SOURCE_CACHE_ID: ${{ inputs.generated_source_sha256 || inputs.xbe_sha256 || secrets.NFSU2_GEN_SHA256 || secrets.NFSU2_XBE_SHA256 || format('run-{0}', github.run_id) }}
 
     steps:
       - name: Check out port
@@ -98,8 +102,18 @@ jobs:
           test -f "$RUNNER_TEMP/SDL2/CMakeLists.txt"
           test -f "$RUNNER_TEMP/SDL2/android-project/app/src/main/java/org/libsdl/app/SDLActivity.java"
 
+      - name: Restore prepared generated game code
+        id: generated-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/nfsu2-gen
+          key: nfsu2-generated-${{ runner.os }}-${{ hashFiles('tools/regen.sh', 'xboxrecomp/tools/**/*.py', 'config/seed_functions.json', 'src/recomp_manual.c') }}-${{ env.NFSU2_SOURCE_CACHE_ID }}
+
       - name: Prepare generated game code
+        id: prepare-generated
         env:
+          GENERATED_CACHE_HIT: ${{ steps.generated-cache.outputs.cache-hit }}
+
           INPUT_GEN_URL: ${{ inputs.generated_source_url }}
           INPUT_GEN_SHA256: ${{ inputs.generated_source_sha256 }}
           INPUT_XBE_URL: ${{ inputs.xbe_url }}
@@ -108,11 +122,21 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/nfsu2-gen" "$RUNNER_TEMP/xbe"
 
-          GEN_URL="${INPUT_GEN_URL:-${NFSU2_GEN_URL:-}}"
-          GEN_SHA256="${INPUT_GEN_SHA256:-}"
-          if [[ -z "$GEN_SHA256" && -n "$GEN_URL" ]]; then
-            GEN_SHA256="${NFSU2_GEN_SHA256:-}"
-          fi
+          if [[ "${GENERATED_CACHE_HIT:-false}" == "true" ]] \
+              && [[ "$(find "$RUNNER_TEMP/nfsu2-gen" -type f -name recomp_funcs.h | wc -l)" -eq 1 ]] \
+              && [[ "$(find "$RUNNER_TEMP/nfsu2-gen" -type f -name '*.c' | wc -l)" -gt 0 ]]; then
+            echo "Using prepared generated game code from the Actions cache."
+            echo "prepared=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prepared=true" >> "$GITHUB_OUTPUT"
+            rm -rf "$RUNNER_TEMP/nfsu2-gen"
+            mkdir -p "$RUNNER_TEMP/nfsu2-gen"
+
+            GEN_URL="${INPUT_GEN_URL:-${NFSU2_GEN_URL:-}}"
+            GEN_SHA256="${INPUT_GEN_SHA256:-}"
+            if [[ -z "$GEN_SHA256" && -n "$GEN_URL" ]]; then
+              GEN_SHA256="${NFSU2_GEN_SHA256:-}"
+            fi
 
           download() {
             local url="$1" output="$2" token="${3:-}"
@@ -162,6 +186,7 @@ jobs:
               NFSU2_GEN_DIR="$RUNNER_TEMP/nfsu2-gen" \
               XBOXRECOMP_DIR="$GITHUB_WORKSPACE/xboxrecomp" \
               bash tools/regen.sh
+            fi
           fi
 
           mapfile -t headers < <(find "$RUNNER_TEMP/nfsu2-gen" -type f -name recomp_funcs.h -print)
@@ -178,6 +203,13 @@ jobs:
           }
           echo "NFSU2_GEN_DIR=$GEN_DIR" >> "$GITHUB_ENV"
           echo "Using $generated_c generated C files from $GEN_DIR"
+
+      - name: Cache prepared generated game code
+        if: steps.prepare-generated.outputs.prepared == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/nfsu2-gen
+          key: nfsu2-generated-${{ runner.os }}-${{ hashFiles('tools/regen.sh', 'xboxrecomp/tools/**/*.py', 'config/seed_functions.json', 'src/recomp_manual.c') }}-${{ env.NFSU2_SOURCE_CACHE_ID }}
 
       - name: Build APK
         run: |

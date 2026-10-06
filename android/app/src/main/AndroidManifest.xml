@@ -11,7 +11,7 @@
         android:label="NFS Underground 2"
         android:resizeableActivity="true"
         android:supportsRtl="true"
-        android:theme="@style/AppTheme">
+        android:theme="@style/Nfsu2Theme">
         <activity
             android:name=".GameActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
