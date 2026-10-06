@@ -240,6 +240,14 @@ jobs:
         id: apk
         run: |
           set -euo pipefail
+          build_tools="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          [[ -x "$build_tools/apksigner" && -x "$build_tools/zipalign" ]] || {
+            echo "Android build-tools 35.0.0 did not provide apksigner and zipalign" >&2
+            find "$ANDROID_SDK_ROOT/build-tools" -maxdepth 2 \
+              \( -name apksigner -o -name zipalign \) -print >&2 || true
+            exit 1
+          }
+          export PATH="$build_tools:$PATH"
           apk_unsigned="$(find android/app/build/outputs/apk -type f -name '*unsigned.apk' | head -1)"
           if [[ -z "$apk_unsigned" ]]; then
             apk_unsigned="$(find android/app/build/outputs/apk -type f -name '*.apk' | head -1)"
