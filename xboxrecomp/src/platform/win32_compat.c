@@ -28,6 +28,13 @@
 #include <unistd.h>
 #include <sched.h>
 #include <fenv.h>
+#if defined(__ANDROID__) && !defined(MAP_FIXED_NOREPLACE)
+/* Android NDK headers on older API levels omit the Linux constant even when
+ * the device kernel supports it. Keep exact-address mappings available for
+ * the Xbox RAM/device windows; the runtime falls back to MAP_FIXED only when
+ * the kernel rejects this flag as unsupported. */
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
 #if defined(__ANDROID__)
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
@@ -1852,6 +1859,17 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
     } else
 #endif
     p = mmap(address, size, prot ? prot : PROT_READ | PROT_WRITE, flags, -1, 0);
+#if defined(__ANDROID__)
+    if (p == MAP_FAILED && address && errno == EINVAL) {
+        /* Some older Android kernels do not implement
+         * MAP_FIXED_NOREPLACE. These addresses are part of the explicitly
+         * reserved Xbox layout, so replacing the failed placeholder is safe
+         * here and is preferable to silently running without physical/tiled
+         * memory. */
+        p = mmap(address, size, prot ? prot : PROT_READ | PROT_WRITE,
+                 (flags & ~MAP_FIXED_NOREPLACE) | MAP_FIXED, -1, 0);
+    }
+#endif
     if (p == MAP_FAILED) {
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return NULL;
@@ -2559,6 +2577,15 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow
     }
 
     void *p = mmap(baseAddr, len, prot, flags, o->fd, off);
+#if defined(__ANDROID__)
+    if (p == MAP_FAILED && baseAddr && errno == EINVAL) {
+        /* See VirtualAlloc above: support Android kernels whose headers or
+         * implementation predate MAP_FIXED_NOREPLACE while preserving the
+         * exact Xbox guest-to-host address relationship. */
+        p = mmap(baseAddr, len, prot,
+                 (flags & ~MAP_FIXED_NOREPLACE) | MAP_FIXED, o->fd, off);
+    }
+#endif
     if (p == MAP_FAILED) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
     if (baseAddr && p != baseAddr) {
         /* MAP_FIXED_NOREPLACE hands back a different address instead of
