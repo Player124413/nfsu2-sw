@@ -2576,6 +2576,24 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow
 #endif
     }
 
+#if defined(__ANDROID__)
+    if (!baseAddr) {
+        /* The first RAM view becomes g_memory_offset. Reserve a little extra,
+         * choose a 64-KiB-aligned address, and remap the actual file view
+         * there. All Xbox apertures are then aligned by the same offset,
+         * including on devices whose mmap alignment is stricter than 4 KiB. */
+        size_t alignment = 0x10000u;
+        size_t probe_len = len + alignment;
+        void *probe = mmap(NULL, probe_len, prot, flags, o->fd, off);
+        if (probe != MAP_FAILED) {
+            uintptr_t aligned = ((uintptr_t)probe + alignment - 1u)
+                              & ~(uintptr_t)(alignment - 1u);
+            munmap(probe, probe_len);
+            baseAddr = (void *)aligned;
+            flags |= MAP_FIXED_NOREPLACE;
+        }
+    }
+#endif
     void *p = mmap(baseAddr, len, prot, flags, o->fd, off);
 #if defined(__ANDROID__)
     if (p == MAP_FAILED && baseAddr && errno == EINVAL) {
